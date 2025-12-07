@@ -18,6 +18,8 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
+    networks:
+      - fast-parser-network
 
   kafka:
     image: confluentinc/cp-kafka:latest
@@ -41,9 +43,42 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:
       - kafka_data:/var/lib/kafka/data
+    networks:
+      - fast-parser-network
+    depends_on:
+      - minio
+
+  parsing_module:
+    container_name: parsing-module
+    build:
+      context: .
+      dockerfile: ./parsing_module/Dockerfile
+    environment:
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: "minioadmin"
+      MINIO_SECRET_KEY: "minioadmin"
+      MINIO_BUCKET: "users"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+    healthcheck:
+      test: [ "CMD-SHELL", "wget --no-verbose --tries=1 --spider http://parsing_module:8080/health || exit -1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - fast-parser-network
     depends_on:
       - minio
 
 volumes:
   minio_data:
   kafka_data:
+
+networks:
+  fast-parser-network:
+    driver: bridge
