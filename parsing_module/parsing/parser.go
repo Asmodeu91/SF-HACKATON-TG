@@ -1,9 +1,10 @@
 package parsing
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
+
+	jsoniter "github.com/json-iterator/go"
 
 	. "json_parser_module/entities"
 )
@@ -17,17 +18,14 @@ func ParseFile(filePatch string) error {
 	defer f.Close()
 
 	var decodedRequest Root
-	decoder := json.NewDecoder(f)
+	decoder := jsoniter.NewDecoder(f)
 	err = decoder.Decode(&decodedRequest)
 	if err != nil {
 		return err
 	}
 
-	var messageCountMap map[string]int
-	messageCountMap = make(map[string]int)
-
-	var usernameMap map[string]string
-	usernameMap = make(map[string]string)
+	var messageCountMap map[string]int = make(map[string]int)
+	var usernameMap map[string]string = make(map[string]string)
 
 	for _, value := range decodedRequest.Messages {
 		if value.FromId == "" {
@@ -46,4 +44,29 @@ func ParseFile(filePatch string) error {
 	// fmt.Println(wr.String())
 
 	return nil
+}
+
+func ParseBytes(input []byte) (map[string]string, error) {
+	fmt.Println("### Read from byte array ###")
+
+	var decodedRequest Root
+	var json = jsoniter.ConfigCompatibleWithStandardLibrary
+	err := json.Unmarshal(input, &decodedRequest)
+	if err != nil {
+		return nil, err
+	}
+
+	var resultMap map[string]string = make(map[string]string)
+	var counter int = 0
+	for _, value := range decodedRequest.Messages {
+		counter++
+		if value.FromId == "" {
+			continue
+		}
+
+		resultMap[value.FromId] = value.From
+	}
+	fmt.Println("Message count: ", counter)
+
+	return resultMap, nil
 }
