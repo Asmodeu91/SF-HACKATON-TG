@@ -64,8 +64,8 @@ func NewMinioAdapter() *MinioAdapter {
 	return svc
 }
 
-func (adapter *MinioAdapter) GetFileAsBytes(file_name string) []byte {
-	reader, err := adapter.client.GetObject(context.Background(), adapter.defaultBucket, file_name, minio.GetObjectOptions{})
+func (adapter *MinioAdapter) GetFileAsBytes(bucket, file_name string) []byte {
+	reader, err := adapter.client.GetObject(context.Background(), bucket, file_name, minio.GetObjectOptions{})
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -80,12 +80,12 @@ func (adapter *MinioAdapter) GetFileAsBytes(file_name string) []byte {
 	return buf.Bytes()
 }
 
-func (adapter *MinioAdapter) RemoveFile(file_name string) error {
+func (adapter *MinioAdapter) RemoveFile(bucket, file_name string) error {
 	opts := minio.RemoveObjectOptions{
 		GovernanceBypass: true,
 	}
 
-	err := adapter.client.RemoveObject(context.Background(), adapter.defaultBucket, file_name, opts)
+	err := adapter.client.RemoveObject(context.Background(), bucket, file_name, opts)
 	if err != nil {
 		log.Fatalln(err)
 		return err

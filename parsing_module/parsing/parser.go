@@ -6,7 +6,7 @@ import (
 
 	jsoniter "github.com/json-iterator/go"
 
-	. "json_parser_module/entities"
+	. "json_parser_module/dto"
 )
 
 func ParseFile(filePatch string) error {
@@ -44,6 +44,18 @@ func ParseFile(filePatch string) error {
 	// fmt.Println(wr.String())
 
 	return nil
+}
+
+func ParseInputEvent(input string) (*InputEvent, error) {
+	var decodedInput InputEvent
+	var json = jsoniter.ConfigCompatibleWithStandardLibrary
+	// fmt.Println(*input)
+	err := json.Unmarshal([]byte(input), &decodedInput)
+	if err != nil {
+		return nil, err
+	}
+
+	return &decodedInput, nil
 }
 
 func ParseBytes(input []byte) (map[string]string, error) {
