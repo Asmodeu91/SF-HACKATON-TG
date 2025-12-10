@@ -49,7 +49,6 @@ func ParseFile(filePatch string) error {
 func ParseInputEvent(input string) (*InputEvent, error) {
 	var decodedInput InputEvent
 	var json = jsoniter.ConfigCompatibleWithStandardLibrary
-	// fmt.Println(*input)
 	err := json.Unmarshal([]byte(input), &decodedInput)
 	if err != nil {
 		return nil, err
@@ -81,4 +80,14 @@ func ParseBytes(input []byte) (map[string]string, error) {
 	fmt.Println("Message count: ", counter)
 
 	return resultMap, nil
+}
+
+func SerializeToJson(data interface{}) ([]byte, error) {
+	var json = jsoniter.ConfigCompatibleWithStandardLibrary
+	var result, err = json.Marshal(&data)
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
 }

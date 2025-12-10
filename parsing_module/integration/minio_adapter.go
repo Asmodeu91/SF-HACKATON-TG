@@ -9,20 +9,21 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
-	. "json_parser_module/utils"
+	"json_parser_module/utils"
 )
 
 type MinioAdapter struct {
 	client        *minio.Client
 	defaultBucket string
+	endpoint      string
 }
 
-func (adapter *MinioAdapter) ensureBucket(context context.Context, bucket string) error {
+func (adapter *MinioAdapter) ensureBucket(ctx context.Context, bucket string) error {
 	if bucket == "" {
 		return fmt.Errorf("Bucket name is required")
 	}
 
-	exists, err := adapter.client.BucketExists(context, bucket)
+	exists, err := adapter.client.BucketExists(ctx, bucket)
 	if err != nil {
 		return err
 	}
@@ -31,14 +32,14 @@ func (adapter *MinioAdapter) ensureBucket(context context.Context, bucket string
 		return nil
 	}
 
-	return adapter.client.MakeBucket(context, bucket, minio.MakeBucketOptions{})
+	return adapter.client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{})
 }
 
 func NewMinioAdapter() *MinioAdapter {
-	var endpoint = GetEnv("MINIO_ENDPOINT", "localhost:9000")
-	var accessKey = GetEnv("MINIO_ACCESS_KEY", "minioadmin")
-	var secretKey = GetEnv("MINIO_SECRET_KEY", "minioadmin")
-	var bucket = GetEnv("MINIO_BUCKET", "telegram")
+	var endpoint = utils.GetEnv("MINIO_ENDPOINT", "localhost:9000")
+	var accessKey = utils.GetEnv("MINIO_ACCESS_KEY", "minioadmin")
+	var secretKey = utils.GetEnv("MINIO_SECRET_KEY", "minioadmin")
+	var bucket = utils.GetEnv("MINIO_BUCKET", "output-files")
 
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
@@ -46,13 +47,14 @@ func NewMinioAdapter() *MinioAdapter {
 	})
 
 	if err != nil {
-		go log.Printf("Unable minio connect %s: %v", bucket, err)
+		log.Printf("Unable minio connect %s: %v", bucket, err)
 		return nil
 	}
 
 	svc := &MinioAdapter{
 		client:        client,
 		defaultBucket: bucket,
+		endpoint:      endpoint,
 	}
 
 	if bucket != "" {
@@ -62,6 +64,14 @@ func NewMinioAdapter() *MinioAdapter {
 	}
 
 	return svc
+}
+
+func (adapter *MinioAdapter) GetBucket() string {
+	return adapter.defaultBucket
+}
+
+func (adapter *MinioAdapter) GetEndpoint() string {
+	return adapter.endpoint
 }
 
 func (adapter *MinioAdapter) GetFileAsBytes(bucket, file_name string) []byte {
@@ -92,4 +102,25 @@ func (adapter *MinioAdapter) RemoveFile(bucket, file_name string) error {
 	}
 
 	return nil
+}
+
+func (adapter *MinioAdapter) UploadObject(objectName string, content []byte, contentType string) (*minio.UploadInfo, error) {
+	if objectName == "" {
+		return nil, fmt.Errorf("Object name is required")
+	}
+
+	if err := adapter.ensureBucket(context.Background(), adapter.defaultBucket); err != nil {
+		return nil, err
+	}
+
+	reader := bytes.NewReader(content)
+	info, err := adapter.client.PutObject(context.Background(), adapter.defaultBucket, objectName, reader, reader.Size(), minio.PutObjectOptions{
+		ContentType: contentType,
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &info, nil
 }
