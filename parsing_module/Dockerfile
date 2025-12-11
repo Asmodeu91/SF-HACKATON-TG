@@ -31,7 +31,7 @@
 FROM golang:1.24-alpine AS builder
 
 # Копирование файлов
-COPY . /app
+COPY ./parsing_module /app
 
 # Установка рабочей директории
 WORKDIR /app
@@ -43,4 +43,4 @@ RUN go mod download
 # RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o app .
 RUN go build -o app .
 
-ENTRYPOINT ["ls", "-lah"]
+ENTRYPOINT ["./app"]

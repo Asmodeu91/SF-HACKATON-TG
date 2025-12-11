@@ -36,7 +36,7 @@ func (adapter *MinioAdapter) ensureBucket(ctx context.Context, bucket string) er
 }
 
 func NewMinioAdapter() *MinioAdapter {
-	var endpoint = utils.GetEnv("MINIO_ENDPOINT", "localhost:9000")
+	var endpoint = utils.GetEnv("MINIO_ENDPOINT", "minio:9000")
 	var accessKey = utils.GetEnv("MINIO_ACCESS_KEY", "minioadmin")
 	var secretKey = utils.GetEnv("MINIO_SECRET_KEY", "minioadmin")
 	var bucket = utils.GetEnv("MINIO_BUCKET", "output-files")
@@ -104,13 +104,13 @@ func (adapter *MinioAdapter) RemoveFile(bucket, file_name string) error {
 	return nil
 }
 
-func (adapter *MinioAdapter) UploadObject(objectName string, content []byte, contentType string) (*minio.UploadInfo, error) {
+func (adapter *MinioAdapter) UploadObject(objectName string, content []byte, contentType string) (string, error) {
 	if objectName == "" {
-		return nil, fmt.Errorf("Object name is required")
+		return "", fmt.Errorf("Object name is required")
 	}
 
 	if err := adapter.ensureBucket(context.Background(), adapter.defaultBucket); err != nil {
-		return nil, err
+		return "", err
 	}
 
 	reader := bytes.NewReader(content)
@@ -119,8 +119,8 @@ func (adapter *MinioAdapter) UploadObject(objectName string, content []byte, con
 	})
 
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	return &info, nil
+	return info.ChecksumSHA256, nil
 }

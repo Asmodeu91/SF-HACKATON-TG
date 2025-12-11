@@ -16,9 +16,9 @@ type KafkaAdapter struct {
 }
 
 func NewKafkaAdapter() *KafkaAdapter {
-	var bootstrap = utils.GetEnv("KAFKA_BOOTSTRAP", "192.168.3.134:9092")
+	var bootstrap = utils.GetEnv("KAFKA_BOOTSTRAP", "kafka:9092")
 	var inputTopic = utils.GetEnv("KAFKA_INPUT_TOPIC", "INPUT")
-	var outputTopic = utils.GetEnv("KAFKA_INPUT_TOPIC", "OUTPUT")
+	var outputTopic = utils.GetEnv("KAFKA_OUTPUT_TOPIC", "OUTPUT")
 	var consumerGroup = utils.GetEnv("KAFKA_CONSUMER_GROUP", "parser")
 
 	reader := kafka.NewReader(kafka.ReaderConfig{

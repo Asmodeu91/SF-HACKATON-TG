@@ -14,7 +14,7 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
       KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
-      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://192.168.3.134:9092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
       KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
@@ -27,6 +27,26 @@ services:
       - kafka_data:/var/lib/kafka/data
     networks:
       - fast-parser-network
+  
+  init-kafka:
+    image: confluentinc/cp-kafka:latest
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      # blocks until kafka is reachable
+      kafka-topics --bootstrap-server kafka:9092 --list
+
+      echo -e 'Creating kafka topics'
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic INPUT --replication-factor 1 --partitions 1
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic OUTPUT --replication-factor 1 --partitions 1
+
+      echo -e 'Successfully created the following topics:'
+      kafka-topics --bootstrap-server kafka:9092 --list
+      "
+    networks:
+      - fast-parser-network
+    depends_on:
+      - kafka
 
   kafka-ui:
     container_name: kafka-ui
@@ -34,9 +54,11 @@ services:
     ports:
       - 8080:8080
     environment:
+      KAFKA_CLUSTERS_0_NAME: kafka
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: PLAINTEXT://kafka:9092
       DYNAMIC_CONFIG_ENABLED: true
       # Добавляем необходимые переменные для Kafka UI
-      BOOTSTRAP_SERVERS: 192.168.3.134:9092
+      BOOTSTRAP_SERVERS: kafka:9092
     networks:
       - fast-parser-network
     depends_on:
@@ -62,36 +84,25 @@ services:
     networks:
       - fast-parser-network
 
-  # parsing_module:
-  #   container_name: parsing-module
-  #   build:
-  #     context: .
-  #     dockerfile: ./parsing_module/Dockerfile
-  #   environment:
-  #     MINIO_ENDPOINT: "minio:9000"
-  #     MINIO_ACCESS_KEY: "minioadmin"
-  #     MINIO_SECRET_KEY: "minioadmin"
-  #     MINIO_BUCKET: "users"
-  #     KAFKA_BOOTSTRAP: "kafka:9092"
-  #     KAFKA_CONSUMER_GROUP: "parser"
-  #     KAFKA_INPUT_TOPIC: "INPUT"
-  #   restart: unless-stopped
-  #   deploy:
-  #     resources:
-  #       limits:
-  #         cpus: '1'
-  #         memory: 1G
-  #   healthcheck:
-  #     test: [ "CMD-SHELL", "wget --no-verbose --tries=1 --spider http://parsing_module:8080/health || exit -1" ]
-  #     interval: 10s
-  #     timeout: 5s
-  #     retries: 5
-  #     start_period: 10s
-  #   networks:
-  #     - fast-parser-network
-  #   depends_on:
-  #     - minio
-  #     - kafka
+  parsing_module:
+    container_name: parsing-module
+    build:
+      context: .
+      dockerfile: ./parsing_module/Dockerfile
+    environment:
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: "minioadmin"
+      MINIO_SECRET_KEY: "minioadmin"
+      MINIO_BUCKET: "output-files"
+      KAFKA_BOOTSTRAP: "kafka:9092"
+      KAFKA_CONSUMER_GROUP: "parser"
+      KAFKA_INPUT_TOPIC: "INPUT"
+      KAFKA_OUTPUT_TOPIC: "OUTPUT"
+    networks:
+      - fast-parser-network
+    depends_on:
+      - minio
+      - kafka
 
 volumes:
   minio_data:

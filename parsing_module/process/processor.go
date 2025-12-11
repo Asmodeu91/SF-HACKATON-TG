@@ -63,8 +63,49 @@ func (processor *Processor) process(message string) {
 
 	var outputFile = processor.makeOutputFile(usernameMap)
 	var outputFileName = processor.makeOutputFileName()
-	processor.minioAdapter.UploadObject(outputFileName, outputFile, "application/csv")
+	var checksum string
+	checksum, _ = processor.minioAdapter.UploadObject(outputFileName, outputFile, "application/csv")
 
+	// var outputEvent = dto.OutputEvent{
+	// 	EventID:          inputEvent.EventID,
+	// 	EventType:        inputEvent.EventType,
+	// 	EventTimestamp:   time.Now(),
+	// 	TaskID:           inputEvent.Task.TaskID,
+	// 	Status:           "success",
+	// 	ProcessingTimeMS: 0,
+	// 	Input: dto.InputData{
+	// 		FilePath: inputEvent.Storage.ObjectPath,
+	// 		FileSize: inputEvent.File.FileSize,
+	// 		FileType: inputEvent.File.FileType,
+	// 	},
+	// 	Output: dto.OutputData{
+	// 		FilePath:    processor.minioAdapter.GetBucket() + "/" + outputFileName,
+	// 		FileSize:    int64(len(outputFile)),
+	// 		FileType:    "csv",
+	// 		DownloadURL: processor.minioAdapter.GetEndpoint() + "/" + processor.minioAdapter.GetBucket() + "/" + outputFileName,
+	// 		Checksum:    "",
+	// 	},
+	// 	Notifications: dto.Notifications{
+	// 		TelegramChatID:    inputEvent.Task.ChatID,
+	// 		TelegramMessageID: inputEvent.Recovery.OriginalMessageID,
+	// 		ShouldSendFile:    len(usernameMap) > 50,
+	// 	},
+	// }
+
+	var outputEvent = processor.makeResponse(inputEvent, outputFileName, int64(len(outputFile)), checksum, len(usernameMap))
+
+	var json []byte
+	json, err = parsing.SerializeToJson(outputEvent)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	processor.kafkaAdapter.WriteMessage(json)
+
+	fmt.Println("Success")
+}
+
+func (processor *Processor) makeResponse(inputEvent *dto.InputEvent, outputFileName string, fileSize int64, checksum string, countUsername int) *dto.OutputEvent {
 	var outputEvent = dto.OutputEvent{
 		EventID:          inputEvent.EventID,
 		EventType:        inputEvent.EventType,
@@ -79,27 +120,47 @@ func (processor *Processor) process(message string) {
 		},
 		Output: dto.OutputData{
 			FilePath:    processor.minioAdapter.GetBucket() + "/" + outputFileName,
-			FileSize:    int64(len(outputFile)),
+			FileSize:    fileSize,
 			FileType:    "csv",
 			DownloadURL: processor.minioAdapter.GetEndpoint() + "/" + processor.minioAdapter.GetBucket() + "/" + outputFileName,
-			Checksum:    "",
+			Checksum:    checksum,
+		},
+		Results: dto.Results{
+			Validation: dto.ValidationResult{
+				Status:           "valid",
+				SchemaValid:      true,
+				DataQualityScore: 0,
+			},
+			Transformation: dto.TransformationResult{
+				RecordsProcessed:       countUsername,
+				RecordsTransformed:     countUsername,
+				TransformationsApplied: []string{"cleanup", "normalize", "enrich"},
+			},
+			Analysis: dto.AnalysisResult{
+				RecordCount:    countUsername,
+				FieldCount:     2,
+				DetectedIssues: []string{},
+				Statistics: dto.FieldStatistics{
+					NumericFields: 0,
+					TextFields:    2,
+					DateFields:    0,
+				},
+			},
+		},
+		Metadata: dto.Metadata{
+			ProcessorVersion: "0.1",
+			ProcessedBy:      "parsing_module",
+			ProcessingNode:   "worker-01",
+			CorrelationID:    "corr_xyz789",
 		},
 		Notifications: dto.Notifications{
 			TelegramChatID:    inputEvent.Task.ChatID,
 			TelegramMessageID: inputEvent.Recovery.OriginalMessageID,
-			ShouldSendFile:    len(usernameMap) > 50,
+			ShouldSendFile:    countUsername > 50,
 		},
 	}
 
-	var json []byte
-	json, err = parsing.SerializeToJson(outputEvent)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	processor.kafkaAdapter.WriteMessage(json)
-
-	fmt.Println("Success")
+	return &outputEvent
 }
 
 func (processor *Processor) makeOutputFile(usernameMap map[string]string) []byte {
