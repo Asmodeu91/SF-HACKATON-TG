@@ -1,14 +1,18 @@
 package main
 
 import (
+	"json_parser_module/integration"
 	"json_parser_module/process"
 )
 
 func main() {
-	var processor = process.NewProcessor()
-	defer processor.Close()
+	kafkaAdapter := integration.NewKafkaAdapter()
+	defer kafkaAdapter.Close()
 
-	for {
-		processor.Process()
-	}
+	var processor = process.NewProcessor()
+	kafkaAdapter.Listen(func(msg []byte) error {
+		return processor.Process(msg, func(value any) error {
+			return kafkaAdapter.Send(&value)
+		})
+	})
 }

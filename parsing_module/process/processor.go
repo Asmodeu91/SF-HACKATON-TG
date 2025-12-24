@@ -7,49 +7,42 @@ import (
 	"json_parser_module/dto"
 	"json_parser_module/integration"
 	"json_parser_module/parsing"
+	"log"
 	"strings"
 	"time"
+
+	"github.com/zillow/zkafka/v2"
 )
 
 type Processor struct {
 	minioAdapter integration.MinioAdapter
-	kafkaAdapter integration.KafkaAdapter
+	writeFunc    *func(value any) (*zkafka.Response, error)
 }
 
 func NewProcessor() *Processor {
 	var minioAdapter = integration.NewMinioAdapter()
-	var kafkaAdapter = integration.NewKafkaAdapter()
 
 	var processor = Processor{
 		minioAdapter: *minioAdapter,
-		kafkaAdapter: *kafkaAdapter,
 	}
 
 	return &processor
 }
 
-// Закрыть все соединения с кафкой
-func (processor *Processor) Close() {
-	processor.kafkaAdapter.Close()
+func (processor *Processor) Process(message []byte, sendResponse func(value any) error) error {
+	go processor.process(message, sendResponse)
+
+	return nil
 }
 
-func (processor *Processor) Process() {
-	var message, _ = processor.kafkaAdapter.ReadMessage()
-	if message == "" {
-		return
-	}
-
-	go processor.process(message)
-}
-
-func (processor *Processor) process(message string) {
-	var inputEvent, err = parsing.ParseInputEvent(message)
+func (processor *Processor) process(message []byte, sendResponse func(value any) error) {
+	var inputEvent, err = parsing.ParseInputEventAsByteArray(message)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
 
-	fmt.Println(&inputEvent)
+	log.Println(&inputEvent)
 	var fileName = strings.Split(inputEvent.Storage.ObjectPath, "/")[1]
 	var inputFile = processor.minioAdapter.GetFileAsBytes(inputEvent.Storage.Bucket, fileName)
 	defer processor.minioAdapter.RemoveFile(inputEvent.Storage.Bucket, fileName)
@@ -57,7 +50,7 @@ func (processor *Processor) process(message string) {
 	var usernameMap map[string]string
 	usernameMap, err = parsing.ParseBytes(inputFile)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return
 	}
 
@@ -66,43 +59,14 @@ func (processor *Processor) process(message string) {
 	var checksum string
 	checksum, _ = processor.minioAdapter.UploadObject(outputFileName, outputFile, "application/csv")
 
-	// var outputEvent = dto.OutputEvent{
-	// 	EventID:          inputEvent.EventID,
-	// 	EventType:        inputEvent.EventType,
-	// 	EventTimestamp:   time.Now(),
-	// 	TaskID:           inputEvent.Task.TaskID,
-	// 	Status:           "success",
-	// 	ProcessingTimeMS: 0,
-	// 	Input: dto.InputData{
-	// 		FilePath: inputEvent.Storage.ObjectPath,
-	// 		FileSize: inputEvent.File.FileSize,
-	// 		FileType: inputEvent.File.FileType,
-	// 	},
-	// 	Output: dto.OutputData{
-	// 		FilePath:    processor.minioAdapter.GetBucket() + "/" + outputFileName,
-	// 		FileSize:    int64(len(outputFile)),
-	// 		FileType:    "csv",
-	// 		DownloadURL: processor.minioAdapter.GetEndpoint() + "/" + processor.minioAdapter.GetBucket() + "/" + outputFileName,
-	// 		Checksum:    "",
-	// 	},
-	// 	Notifications: dto.Notifications{
-	// 		TelegramChatID:    inputEvent.Task.ChatID,
-	// 		TelegramMessageID: inputEvent.Recovery.OriginalMessageID,
-	// 		ShouldSendFile:    len(usernameMap) > 50,
-	// 	},
-	// }
-
 	var outputEvent = processor.makeResponse(inputEvent, outputFileName, int64(len(outputFile)), checksum, len(usernameMap))
 
-	var json []byte
-	json, err = parsing.SerializeToJson(outputEvent)
+	err = sendResponse(&outputEvent)
 	if err != nil {
-		fmt.Println(err)
-		return
+		log.Panic(err)
 	}
-	processor.kafkaAdapter.WriteMessage(json)
 
-	fmt.Println("Success")
+	log.Println("Success")
 }
 
 func (processor *Processor) makeResponse(inputEvent *dto.InputEvent, outputFileName string, fileSize int64, checksum string, countUsername int) *dto.OutputEvent {
@@ -164,10 +128,10 @@ func (processor *Processor) makeResponse(inputEvent *dto.InputEvent, outputFileN
 }
 
 func (processor *Processor) makeOutputFile(usernameMap map[string]string) []byte {
-	fmt.Println("Users: ")
+	log.Println("Users: ")
 	var sb strings.Builder
 	for key, value := range usernameMap {
-		fmt.Println(key, ": ", value)
+		log.Println(key, ": ", value)
 		sb.WriteString(key)
 		sb.WriteString(";")
 		sb.WriteString(value)
@@ -181,7 +145,7 @@ func (processor *Processor) makeOutputFile(usernameMap map[string]string) []byte
 func (processor *Processor) makeOutputFileName() string {
 	now := time.Now()
 	filename := fmt.Sprintf("%s_%s_%s_result.csv", now.Format("20060102"), now.Format("150405"), generateRandomString())
-	return filename
+	return strings.Replace(filename, "/", "-", -1)
 }
 
 // generateRandomString генерирует случайную строку длиной 6 символов

@@ -57,6 +57,17 @@ func ParseInputEvent(input string) (*InputEvent, error) {
 	return &decodedInput, nil
 }
 
+func ParseInputEventAsByteArray(input []byte) (*InputEvent, error) {
+	var decodedInput InputEvent
+	var json = jsoniter.ConfigCompatibleWithStandardLibrary
+	err := json.Unmarshal([]byte(input), &decodedInput)
+	if err != nil {
+		return nil, err
+	}
+
+	return &decodedInput, nil
+}
+
 func ParseBytes(input []byte) (map[string]string, error) {
 	fmt.Println("### Read from byte array ###")
 

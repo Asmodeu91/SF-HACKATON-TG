@@ -46,7 +46,8 @@ services:
     networks:
       - fast-parser-network
     depends_on:
-      - kafka
+      kafka:
+        condition: service_started
 
   kafka-ui:
     container_name: kafka-ui
@@ -62,7 +63,8 @@ services:
     networks:
       - fast-parser-network
     depends_on:
-      - kafka
+      kafka:
+        condition: service_started
 
   minio:
     image: minio/minio
@@ -101,8 +103,10 @@ services:
     networks:
       - fast-parser-network
     depends_on:
-      - minio
-      - kafka
+      minio:
+        condition: service_healthy
+      kafka:
+        condition: service_started
 
 volumes:
   minio_data:
