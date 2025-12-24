@@ -2,17 +2,21 @@ package integration
 
 import (
 	"context"
-	"fmt"
 	"json_parser_module/utils"
 	"log"
-	"time"
+	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/zillow/zfmt"
+	"github.com/zillow/zkafka/v2"
 )
 
 type KafkaAdapter struct {
-	reader *kafka.Reader
-	writer *kafka.Writer
+	context *context.Context
+	config  *zkafka.ConsumerTopicConfig
+	client  *zkafka.Client
+	writer  *zkafka.Writer
 }
 
 func NewKafkaAdapter() *KafkaAdapter {
@@ -21,61 +25,67 @@ func NewKafkaAdapter() *KafkaAdapter {
 	var outputTopic = utils.GetEnv("KAFKA_OUTPUT_TOPIC", "OUTPUT")
 	var consumerGroup = utils.GetEnv("KAFKA_CONSUMER_GROUP", "parser")
 
-	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: []string{bootstrap},
-		Topic:   inputTopic,
-		GroupID: consumerGroup,
-	})
-	log.Println("Consumer initialized")
+	context := context.Background()
 
-	writer := kafka.NewWriter(kafka.WriterConfig{
-		Brokers:      []string{bootstrap},
-		Topic:        outputTopic,
-		RequiredAcks: -1,                  // Подтверждение от всех реплик
-		MaxAttempts:  10,                  //кол-во попыток доставки(по умолчанию всегда 10)
-		BatchSize:    100,                 // Ограничение на количество сообщений(по дефолту 100)
-		WriteTimeout: 10 * time.Second,    //время ожидания для записи(по умолчанию 10сек)
-		Balancer:     &kafka.RoundRobin{}, //балансировщик.
+	client := zkafka.NewClient(zkafka.Config{
+		BootstrapServers: []string{bootstrap},
 	})
-	log.Println("Producer initialized")
+	writer, _ := client.Writer(context, zkafka.ProducerTopicConfig{
+		ClientID:  "service-parser",
+		Topic:     outputTopic,
+		Formatter: zfmt.JSONFmt,
+	})
 
-	var adapter = &KafkaAdapter{
-		reader: reader,
-		writer: writer,
+	config := zkafka.ConsumerTopicConfig{
+		ClientID:  "service-parser",
+		GroupID:   consumerGroup,
+		Topic:     inputTopic,
+		Formatter: zfmt.JSONFmt,
+		AdditionalProps: map[string]any{
+			"auto.offset.reset": "earliest",
+		},
 	}
 
-	return adapter
-}
-
-// Чтение сообщений из кафки
-func (adapter *KafkaAdapter) ReadMessage() (string, error) {
-	var message, err = adapter.reader.ReadMessage(context.Background())
-	if err != nil {
-		fmt.Printf("Consumer error: %v (%v)\n", err, message)
-		return "", err
+	return &KafkaAdapter{
+		context: &context,
+		config:  &config,
+		client:  client,
+		writer:  &writer,
 	}
-	fmt.Printf("Message on %s: %s\n", message.Topic, string(message.Value))
-
-	return string(message.Value), nil
 }
 
-// Отправка сообщений в кафку
-func (adapter *KafkaAdapter) WriteMessage(message []byte) error {
-	var err = adapter.writer.WriteMessages(context.Background(), kafka.Message{
-		Value: message,
-	})
-	if err != nil {
-		fmt.Printf("Producer error: %v (%v)\n", err, string(message))
-		return err
+func (adapter *KafkaAdapter) Listen(process func(msg []byte) error) {
+	stopCh := make(chan os.Signal, 1)
+	signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
+	shutdown := make(chan struct{})
+
+	go func() {
+		<-stopCh
+		close(shutdown)
+	}()
+
+	callback := func(_ context.Context, msg *zkafka.Message) error {
+		log.Printf(" offset: %d, partition: %d\n", msg.Offset, msg.Partition)
+		return process(msg.Value())
 	}
 
-	fmt.Printf("Message to %s: %s\n", adapter.writer.Topic, string(message))
-
-	return nil
+	wf := zkafka.NewWorkFactory(adapter.client)
+	work := wf.CreateWithFunc(*adapter.config, callback, zkafka.Speedup(5))
+	if err := work.Run(*adapter.context, shutdown); err != nil {
+		log.Panic(err)
+	}
 }
 
-// Закрыть все соединения с кафкой
+func (adapter *KafkaAdapter) Send(value *any) error {
+	writer := *adapter.writer
+	response, err := writer.Write(*adapter.context, *value)
+	log.Printf("Response: %+v\n", response)
+	return err
+}
+
 func (adapter *KafkaAdapter) Close() {
-	adapter.reader.Close()
-	adapter.writer.Close()
+	client := adapter.client
+	client.Close()
+	writer := *adapter.writer
+	writer.Close()
 }
