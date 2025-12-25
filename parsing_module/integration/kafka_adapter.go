@@ -54,6 +54,7 @@ func NewKafkaAdapter() *KafkaAdapter {
 	}
 }
 
+// Слушаем топик входящих сообщений
 func (adapter *KafkaAdapter) Listen(process func(msg []byte) error) {
 	stopCh := make(chan os.Signal, 1)
 	signal.Notify(stopCh, os.Interrupt, syscall.SIGTERM)
@@ -76,6 +77,7 @@ func (adapter *KafkaAdapter) Listen(process func(msg []byte) error) {
 	}
 }
 
+// Отправка сообщения в топик исходящих сообщений
 func (adapter *KafkaAdapter) Send(value *any) error {
 	writer := *adapter.writer
 	response, err := writer.Write(*adapter.context, *value)

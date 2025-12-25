@@ -74,6 +74,7 @@ func (adapter *MinioAdapter) GetEndpoint() string {
 	return adapter.endpoint
 }
 
+// Чтение файла из minio
 func (adapter *MinioAdapter) GetFileAsBytes(bucket, file_name string) ([]byte, error) {
 	reader, err := adapter.client.GetObject(context.Background(), bucket, file_name, minio.GetObjectOptions{})
 	if err != nil {
@@ -90,6 +91,7 @@ func (adapter *MinioAdapter) GetFileAsBytes(bucket, file_name string) ([]byte, e
 	return buf.Bytes(), nil
 }
 
+// Удаление файла из minio
 func (adapter *MinioAdapter) RemoveFile(bucket, file_name string) error {
 	opts := minio.RemoveObjectOptions{
 		GovernanceBypass: true,
@@ -103,6 +105,7 @@ func (adapter *MinioAdapter) RemoveFile(bucket, file_name string) error {
 	return nil
 }
 
+// Отправка файла в minio
 func (adapter *MinioAdapter) UploadObject(objectName string, content []byte, contentType string) (string, error) {
 	if objectName == "" {
 		return "", fmt.Errorf("Object name is required")
