@@ -8,6 +8,7 @@ import (
 	"json_parser_module/integration"
 	"json_parser_module/parsing"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,8 +65,8 @@ func (processor *Processor) process(message []byte, sendResponse func(value any)
 	}
 	defer processor.minioAdapter.RemoveFile(inputEvent.Storage.Bucket, fileName)
 
-	var usernameMap map[string]string
-	usernameMap, err = parsing.ParseBytes(inputFile)
+	var userInfoMap dto.UserInfoSlice
+	userInfoMap, err = parsing.ParseBytes(inputFile)
 	if err != nil {
 		log.Println(err)
 		var outputEvent = processor.makeResponseError(inputEvent, err, startTime)
@@ -75,7 +76,7 @@ func (processor *Processor) process(message []byte, sendResponse func(value any)
 		return
 	}
 
-	var outputFile = processor.makeOutputFile(usernameMap)
+	var outputFile = processor.makeOutputFile(userInfoMap)
 	var outputFileName = processor.makeOutputFileName()
 	var checksum string
 	checksum, err = processor.minioAdapter.UploadObject(outputFileName, outputFile, "application/csv")
@@ -88,7 +89,7 @@ func (processor *Processor) process(message []byte, sendResponse func(value any)
 		return
 	}
 
-	var outputEvent = processor.makeResponseSuccess(inputEvent, outputFileName, int64(len(outputFile)), checksum, len(usernameMap), startTime)
+	var outputEvent = processor.makeResponseSuccess(inputEvent, outputFileName, int64(len(outputFile)), checksum, len(userInfoMap), startTime)
 	if err = sendResponse(&outputEvent); err != nil {
 		log.Panic(err)
 		return
@@ -191,14 +192,18 @@ func (processor *Processor) makeResponseError(inputEvent *dto.InputEvent, err er
 }
 
 // Метод собирает файл с результатами
-func (processor *Processor) makeOutputFile(usernameMap map[string]string) []byte {
+func (processor *Processor) makeOutputFile(userInfoMap dto.UserInfoSlice) []byte {
 	log.Println("Users: ")
 	var sb strings.Builder
-	for key, value := range usernameMap {
+	for key, value := range userInfoMap {
 		log.Println(key, ": ", value)
-		sb.WriteString(key)
+		sb.WriteString(value.UserId)
 		sb.WriteString(";")
-		sb.WriteString(value)
+		sb.WriteString(value.UserName)
+		sb.WriteString(";")
+		sb.WriteString(strconv.Itoa(value.MessageCount))
+		sb.WriteString(";")
+		sb.WriteString(strconv.Itoa(value.PercentMsg))
 		sb.WriteString("\n")
 	}
 
