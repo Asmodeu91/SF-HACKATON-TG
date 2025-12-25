@@ -29,54 +29,83 @@ func NewProcessor() *Processor {
 	return &processor
 }
 
+// Процесс обработки сообщения и парсинга файла
 func (processor *Processor) Process(message []byte, sendResponse func(value any) error) error {
 	go processor.process(message, sendResponse)
 
 	return nil
 }
 
+// Процесс обработки сообщения и парсинга файла
 func (processor *Processor) process(message []byte, sendResponse func(value any) error) {
+	startTime := time.Now()
+
 	var inputEvent, err = parsing.ParseInputEventAsByteArray(message)
 	if err != nil {
 		log.Println(err)
+		var outputEvent = processor.makeResponseError(inputEvent, err, startTime)
+		if err = sendResponse(&outputEvent); err != nil {
+			log.Panic(err)
+		}
 		return
 	}
 
 	log.Println(&inputEvent)
 	var fileName = strings.Split(inputEvent.Storage.ObjectPath, "/")[1]
-	var inputFile = processor.minioAdapter.GetFileAsBytes(inputEvent.Storage.Bucket, fileName)
+	var inputFile []byte
+	inputFile, err = processor.minioAdapter.GetFileAsBytes(inputEvent.Storage.Bucket, fileName)
+	if err != nil {
+		log.Println(err)
+		var outputEvent = processor.makeResponseError(inputEvent, err, startTime)
+		if err = sendResponse(&outputEvent); err != nil {
+			log.Panic(err)
+		}
+		return
+	}
 	defer processor.minioAdapter.RemoveFile(inputEvent.Storage.Bucket, fileName)
 
 	var usernameMap map[string]string
 	usernameMap, err = parsing.ParseBytes(inputFile)
 	if err != nil {
 		log.Println(err)
+		var outputEvent = processor.makeResponseError(inputEvent, err, startTime)
+		if err = sendResponse(&outputEvent); err != nil {
+			log.Panic(err)
+		}
 		return
 	}
 
 	var outputFile = processor.makeOutputFile(usernameMap)
 	var outputFileName = processor.makeOutputFileName()
 	var checksum string
-	checksum, _ = processor.minioAdapter.UploadObject(outputFileName, outputFile, "application/csv")
-
-	var outputEvent = processor.makeResponse(inputEvent, outputFileName, int64(len(outputFile)), checksum, len(usernameMap))
-
-	err = sendResponse(&outputEvent)
+	checksum, err = processor.minioAdapter.UploadObject(outputFileName, outputFile, "application/csv")
 	if err != nil {
+		log.Println(err)
+		var outputEvent = processor.makeResponseError(inputEvent, err, startTime)
+		if err = sendResponse(&outputEvent); err != nil {
+			log.Panic(err)
+		}
+		return
+	}
+
+	var outputEvent = processor.makeResponseSuccess(inputEvent, outputFileName, int64(len(outputFile)), checksum, len(usernameMap), startTime)
+	if err = sendResponse(&outputEvent); err != nil {
 		log.Panic(err)
+		return
 	}
 
 	log.Println("Success")
 }
 
-func (processor *Processor) makeResponse(inputEvent *dto.InputEvent, outputFileName string, fileSize int64, checksum string, countUsername int) *dto.OutputEvent {
+// Формирование ответного сообщения
+func (processor *Processor) makeResponseSuccess(inputEvent *dto.InputEvent, outputFileName string, fileSize int64, checksum string, countUsername int, startTime time.Time) *dto.OutputEvent {
 	var outputEvent = dto.OutputEvent{
 		EventID:          inputEvent.EventID,
-		EventType:        inputEvent.EventType,
+		EventType:        "file_processed",
 		EventTimestamp:   time.Now(),
 		TaskID:           inputEvent.Task.TaskID,
 		Status:           "success",
-		ProcessingTimeMS: 0,
+		ProcessingTimeMS: time.Since(startTime).Milliseconds(),
 		Input: dto.InputData{
 			FilePath: inputEvent.Storage.ObjectPath,
 			FileSize: inputEvent.File.FileSize,
@@ -127,6 +156,41 @@ func (processor *Processor) makeResponse(inputEvent *dto.InputEvent, outputFileN
 	return &outputEvent
 }
 
+// Формирование ответа с ошибкой
+func (processor *Processor) makeResponseError(inputEvent *dto.InputEvent, err error, startTime time.Time) *dto.ErrorEvent {
+	var outputEvent = dto.ErrorEvent{
+		EventID:          inputEvent.EventID,
+		EventType:        "file_processing_failed",
+		EventTimestamp:   time.Now(),
+		TaskID:           inputEvent.Task.TaskID,
+		Status:           "error",
+		ErrorCode:        "processing error",
+		ErrorMessage:     err.Error(),
+		ProcessingTimeMS: time.Since(startTime).Milliseconds(),
+		Input: dto.InputData{
+			FilePath: inputEvent.Storage.ObjectPath,
+			FileSize: inputEvent.File.FileSize,
+			FileType: inputEvent.File.FileType,
+		},
+		ErrorDetails: dto.ErrorDetails{},
+		Recovery:     dto.RecoveryOptions{},
+		Metadata: dto.Metadata{
+			ProcessorVersion: "0.1",
+			ProcessedBy:      "parsing_module",
+			ProcessingNode:   "worker-01",
+			CorrelationID:    "corr_xyz789",
+		},
+		Notifications: dto.NotificationSettings{
+			TelegramChatID:    inputEvent.Task.ChatID,
+			TelegramMessageID: inputEvent.Recovery.OriginalMessageID,
+			ShouldNotifyUser:  true,
+		},
+	}
+
+	return &outputEvent
+}
+
+// Метод собирает файл с результатами
 func (processor *Processor) makeOutputFile(usernameMap map[string]string) []byte {
 	log.Println("Users: ")
 	var sb strings.Builder

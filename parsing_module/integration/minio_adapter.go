@@ -74,20 +74,20 @@ func (adapter *MinioAdapter) GetEndpoint() string {
 	return adapter.endpoint
 }
 
-func (adapter *MinioAdapter) GetFileAsBytes(bucket, file_name string) []byte {
+func (adapter *MinioAdapter) GetFileAsBytes(bucket, file_name string) ([]byte, error) {
 	reader, err := adapter.client.GetObject(context.Background(), bucket, file_name, minio.GetObjectOptions{})
 	if err != nil {
-		log.Fatalln(err)
+		return nil, err
 	}
 	defer reader.Close()
 
 	buf := new(bytes.Buffer)
 	_, err = buf.ReadFrom(reader)
 	if err != nil {
-		log.Fatalln(err)
+		return nil, err
 	}
 
-	return buf.Bytes()
+	return buf.Bytes(), nil
 }
 
 func (adapter *MinioAdapter) RemoveFile(bucket, file_name string) error {
@@ -97,7 +97,6 @@ func (adapter *MinioAdapter) RemoveFile(bucket, file_name string) error {
 
 	err := adapter.client.RemoveObject(context.Background(), bucket, file_name, opts)
 	if err != nil {
-		log.Fatalln(err)
 		return err
 	}
 

@@ -29,7 +29,6 @@ require (
 	github.com/minio/crc64nvme v1.1.0 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
-	github.com/pierrec/lz4/v4 v4.1.15 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/santhosh-tekuri/jsonschema/v5 v5.3.1 // indirect
 	github.com/sony/gobreaker v1.0.0 // indirect
@@ -52,6 +51,5 @@ require (
 	github.com/minio/minio-go/v7 v7.0.97
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
-	github.com/segmentio/kafka-go v0.4.49
 	github.com/zillow/zkafka/v2 v2.2.1
 )
