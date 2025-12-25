@@ -2,60 +2,11 @@ package parsing
 
 import (
 	"fmt"
-	"os"
 
 	jsoniter "github.com/json-iterator/go"
 
 	. "json_parser_module/dto"
 )
-
-func ParseFile(filePatch string) error {
-	fmt.Println("### Read as reader ###")
-	f, err := os.Open(filePatch)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	var decodedRequest Root
-	decoder := jsoniter.NewDecoder(f)
-	err = decoder.Decode(&decodedRequest)
-	if err != nil {
-		return err
-	}
-
-	var messageCountMap map[string]int = make(map[string]int)
-	var usernameMap map[string]string = make(map[string]string)
-
-	for _, value := range decodedRequest.Messages {
-		if value.FromId == "" {
-			continue
-		}
-
-		messageCountMap[value.FromId]++
-		usernameMap[value.FromId] = value.From
-	}
-
-	// fmt.Printf("%+v\n", decodedRequest)
-	for key, value := range messageCountMap {
-		fmt.Println(usernameMap[key], ": ", value)
-	}
-
-	// fmt.Println(wr.String())
-
-	return nil
-}
-
-func ParseInputEvent(input string) (*InputEvent, error) {
-	var decodedInput InputEvent
-	var json = jsoniter.ConfigCompatibleWithStandardLibrary
-	err := json.Unmarshal([]byte(input), &decodedInput)
-	if err != nil {
-		return nil, err
-	}
-
-	return &decodedInput, nil
-}
 
 func ParseInputEventAsByteArray(input []byte) (*InputEvent, error) {
 	var decodedInput InputEvent
@@ -91,14 +42,4 @@ func ParseBytes(input []byte) (map[string]string, error) {
 	fmt.Println("Message count: ", counter)
 
 	return resultMap, nil
-}
-
-func SerializeToJson(data interface{}) ([]byte, error) {
-	var json = jsoniter.ConfigCompatibleWithStandardLibrary
-	var result, err = json.Marshal(&data)
-	if err != nil {
-		return nil, err
-	}
-
-	return result, nil
 }
