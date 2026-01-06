@@ -66,7 +66,7 @@ func (processor *Processor) process(message []byte, sendResponse func(value any)
 	defer processor.minioAdapter.RemoveFile(inputEvent.Storage.Bucket, fileName)
 
 	var userInfoMap dto.UserInfoSlice
-	userInfoMap, err = parsing.ParseBytes(inputFile)
+	userInfoMap, err = parsing.ParseBytesAsTelegramFile(inputFile, inputEvent.File.FileType)
 	if err != nil {
 		log.Println(err)
 		var outputEvent = processor.makeResponseError(inputEvent, err, startTime)
