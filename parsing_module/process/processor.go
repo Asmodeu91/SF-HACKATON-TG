@@ -150,7 +150,7 @@ func (processor *Processor) makeResponseSuccess(inputEvent *dto.InputEvent, outp
 		Notifications: dto.Notifications{
 			TelegramChatID:    inputEvent.Task.ChatID,
 			TelegramMessageID: inputEvent.Recovery.OriginalMessageID,
-			ShouldSendFile:    countUsername > 0,
+			ShouldSendFile:    countUsername > 50,
 		},
 	}
 
@@ -195,10 +195,13 @@ func (processor *Processor) makeResponseError(inputEvent *dto.InputEvent, err er
 func (processor *Processor) makeOutputFile(userInfoMap dto.UserInfoSlice) []byte {
 	log.Println("Users: ")
 	var sb strings.Builder
+	// Добавляем BOM для правильного отображения в Excel
+	sb.WriteString("\ufeff")
 	for key, value := range userInfoMap {
 		log.Println(key, ": ", value)
 		sb.WriteString(value.UserId)
 		sb.WriteString(";")
+		// Кодируем имя пользователя в UTF-8
 		sb.WriteString(value.UserName)
 		sb.WriteString(";")
 		sb.WriteString(strconv.Itoa(value.MessageCount))
