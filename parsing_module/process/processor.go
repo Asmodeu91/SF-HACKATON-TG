@@ -150,7 +150,7 @@ func (processor *Processor) makeResponseSuccess(inputEvent *dto.InputEvent, outp
 		Notifications: dto.Notifications{
 			TelegramChatID:    inputEvent.Task.ChatID,
 			TelegramMessageID: inputEvent.Recovery.OriginalMessageID,
-			ShouldSendFile:    countUsername > 50,
+			ShouldSendFile:    countUsername > 0,
 		},
 	}
 

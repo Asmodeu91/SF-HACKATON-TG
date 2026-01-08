@@ -3,13 +3,13 @@ import asyncio
 import json
 import uuid
 import logging
-import pickle
 import hashlib
+import requests
+import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from io import BytesIO
-from pathlib import Path
 import aiosqlite
 from enum import Enum
 
@@ -49,13 +49,13 @@ class Config:
     MINIO_INPUT_BUCKET: str = field(default_factory=lambda: os.getenv('MINIO_INPUT_BUCKET', 'input-files'))
     MINIO_OUTPUT_BUCKET: str = field(default_factory=lambda: os.getenv('MINIO_OUTPUT_BUCKET', 'output-files'))
 
-    KAFKA_BOOTSTRAP_SERVERS: str = field(default_factory=lambda: os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092'))
-    KAFKA_INPUT_TOPIC: str = field(default_factory=lambda: os.getenv('KAFKA_INPUT_TOPIC', 'file-processing-input'))
-    KAFKA_OUTPUT_TOPIC: str = field(default_factory=lambda: os.getenv('KAFKA_OUTPUT_TOPIC', 'file-processing-output'))
+    KAFKA_BOOTSTRAP_SERVERS: str = field(default_factory=lambda: os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9094'))
+    KAFKA_INPUT_TOPIC: str = field(default_factory=lambda: os.getenv('KAFKA_INPUT_TOPIC', 'INPUT'))
+    KAFKA_OUTPUT_TOPIC: str = field(default_factory=lambda: os.getenv('KAFKA_OUTPUT_TOPIC', 'OUTPUT'))
     KAFKA_CONSUMER_GROUP: str = field(default_factory=lambda: os.getenv('KAFKA_CONSUMER_GROUP', 'telegram-bot-group'))
 
     PROCESSING_TIMEOUT: int = field(default_factory=lambda: int(os.getenv('PROCESSING_TIMEOUT', '300')))  # 5 минут
-    MAX_FILE_SIZE: int = field(default_factory=lambda: int(os.getenv('MAX_FILE_SIZE', '10485760')))  # 10 MB
+    MAX_FILE_SIZE: int = field(default_factory=lambda: int(os.getenv('MAX_FILE_SIZE', '209715200')))  # 10 MB
     STATE_DB_PATH: str = field(default_factory=lambda: os.getenv('STATE_DB_PATH', 'bot_state.db'))
 
 config = Config()
@@ -161,12 +161,17 @@ class StateManager:
         await self.db.commit()
 
     async def mark_kafka_response_received(self, task_id: str):
-        """Отмечает, что ответ Kafka получен"""
-        await self.db.execute(
-            "UPDATE tasks SET kafka_response_received = 1 WHERE task_id = ?",
-            (task_id,)
-        )
-        await self.db.commit()
+        if not isinstance(task_id, str):
+            raise TypeError(f"task_id must be str, got {type(task_id)}")
+
+        query = """
+        UPDATE tasks
+        SET kafka_response_received = 1
+        WHERE task_id = ?
+        """
+
+        async with self.db.execute(query, (task_id,)):
+            await self.db.commit()
 
     async def save_kafka_message(self, task_id: str, topic: str, key: str, value: Dict):
         """Сохраняет отправленное сообщение Kafka"""
@@ -200,7 +205,9 @@ class StateManager:
 
         row = await cursor.fetchone()
         if row:
-            return dict(row)
+            # Преобразуем sqlite3.Row в словарь
+            columns = [description[0] for description in cursor.description]
+            return dict(zip(columns, row))
         return None
 
     async def close(self):
@@ -276,9 +283,12 @@ class ProcessingTask:
 
 
 try:
-    bot = Bot(token=config.TELEGRAM_BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(
+        token=config.TELEGRAM_BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    )
     dp = Dispatcher()
-    logger.info("✅ Бот инициализирован")
+    logger.info("✅ Бот инициализирован с увеличенными таймаутами")
 except Exception as e:
     logger.error(f"❌ Ошибка инициализации бота: {e}")
     exit(1)
@@ -311,8 +321,7 @@ try:
         acks='all',
         retries=3,
         max_block_ms=5000,
-        max_in_flight_requests_per_connection=1,
-        idempotent=True
+        max_in_flight_requests_per_connection=1
     )
     logger.info(f"✅ Kafka Producer подключен к {config.KAFKA_BOOTSTRAP_SERVERS}")
 except Exception as e:
@@ -321,6 +330,102 @@ except Exception as e:
 
 active_tasks = {}  # task_id -> ProcessingTask
 
+# Глобальная ссылка на основной event loop
+main_loop = None
+
+def set_main_loop(loop):
+    """Устанавливает основной event loop"""
+    global main_loop
+    main_loop = loop
+
+async def run_in_main_loop(coro):
+    """Запускает корутину в основном event loop"""
+    if main_loop and main_loop != asyncio.get_event_loop():
+        # Создаем future в основном loop
+        future = asyncio.run_coroutine_threadsafe(coro, main_loop)
+        try:
+            return future.result(timeout=30)
+        except Exception as e:
+            logger.error(f"❌ Ошибка выполнения в основном loop: {e}")
+            return None
+    else:
+        # Уже в основном loop
+        return await coro
+
+def send_telegram_message_sync(chat_id: int, text: str):
+    """Синхронная отправка сообщения через HTTP API"""
+    try:
+        url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": text[:4000],
+            "parse_mode": "HTML"
+        }
+
+        # Попытки с экспоненциальной задержкой
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, json=payload, timeout=30)
+                response.raise_for_status()
+                logger.info(f"✅ HTTP сообщение отправлено в chat_id={chat_id}")
+                return True
+            except requests.exceptions.Timeout:
+                logger.warning(f"⏰ Таймаут HTTP запроса (попытка {attempt + 1})")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)  # Экспоненциальная задержка
+                continue
+            except requests.exceptions.RequestException as e:
+                logger.error(f"❌ HTTP ошибка (попытка {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                continue
+
+        logger.error(f"❌ Не удалось отправить HTTP сообщение после {max_retries} попыток")
+        return False
+
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка HTTP отправки: {e}")
+        return False
+
+async def send_direct_message(chat_id: int, text: str):
+    """Прямая отправка сообщения через основной event loop"""
+    try:
+        logger.info(f"📤 [send_direct_message] Отправка сообщения в chat_id={chat_id}")
+        logger.info(f"📤 [send_direct_message] Текст: {text[:100]}...")
+
+        # Создаем корутину для отправки
+        async def send_coro():
+            try:
+                logger.info(f"📤 [send_coro] Пытаюсь отправить сообщение...")
+                result = await bot.send_message(
+                    chat_id=chat_id,
+                    text=text[:1000],
+                    parse_mode=ParseMode.HTML  # Убедитесь, что используете HTML
+                )
+                logger.info(f"📤 [send_coro] Сообщение отправлено успешно!")
+                return result
+            except Exception as e:
+                logger.error(f"❌ [send_coro] Ошибка: {e}")
+                raise
+
+        # Запускаем в основном loop
+        result = await run_in_main_loop(send_coro())
+
+        if result:
+            logger.info(f"✅ [send_direct_message] Сообщение отправлено в chat_id={chat_id}")
+            return True
+        else:
+            logger.error(f"❌ [send_direct_message] Не удалось отправить сообщение в chat_id={chat_id}")
+            # Пробуем HTTP как запасной вариант
+            logger.info(f"📤 [send_direct_message] Пробую отправить через HTTP API...")
+            return send_telegram_message_sync(chat_id, text)
+
+    except Exception as e:
+        logger.error(f"❌ [send_direct_message] Критическая ошибка отправки в chat_id={chat_id}: {e}")
+        # Пробуем HTTP как последний шанс
+        return send_telegram_message_sync(chat_id, text)
+
 
 async def upload_to_minio(file_content: bytes, file_name: str, bucket: str, content_type: str = "application/octet-stream") -> str:
     """Загружает bytes в MinIO и возвращает путь"""
@@ -328,7 +433,6 @@ async def upload_to_minio(file_content: bytes, file_name: str, bucket: str, cont
         raise Exception("MinIO клиент не инициализирован")
 
     try:
-
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         unique_name = f"{timestamp}_{uuid.uuid4().hex[:8]}_{file_name}"
 
@@ -378,46 +482,44 @@ async def send_to_kafka_input(task: ProcessingTask) -> bool:
     if not kafka_producer:
         raise Exception("Kafka Producer не инициализирован")
 
-
     kafka_message = {
-
-        "event_id": str(uuid.uuid4()),  # Уникальный ID события
-        "event_type": "file_uploaded",  # Тип события
-        "event_timestamp": datetime.now().isoformat(),  # Время события
+        "event_id": str(uuid.uuid4()),
+        "event_type": "file_uploaded",
+        "event_timestamp": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z',
 
         "task": {
-            "task_id": task.task_id,  # Уникальный ID задачи
-            "user_id": task.user_id,  # ID пользователя Telegram
-            "chat_id": task.chat_id,  # ID чата
-            "source": "telegram_bot",  # Источник запроса
+            "task_id": task.task_id,
+            "user_id": task.user_id,
+            "chat_id": task.chat_id,
+            "source": "telegram_bot",
         },
 
         "file": {
-            "original_name": task.file_name,  # Оригинальное имя файла
-            "file_size": None,  # Будет заполнено если известно
+            "original_name": task.file_name,
+            "file_size": None,
             "file_type": "json" if task.file_name.endswith('.json') else "html",
-            "encoding": "utf-8",  # Кодировка файла
+            "encoding": "utf-8",
         },
 
         "storage": {
-            "type": "minio",  # Тип хранилища
-            "bucket": config.MINIO_INPUT_BUCKET,  # Бакет MinIO
-            "object_path": task.original_minio_path,  # Полный путь в MinIO
-            "access_url": f"http://{config.MINIO_ENDPOINT}/{task.original_minio_path}",  # URL для доступа
+            "type": "minio",
+            "bucket": config.MINIO_INPUT_BUCKET,
+            "object_path": task.original_minio_path,
+            "access_url": f"http://{config.MINIO_ENDPOINT}/{task.original_minio_path}",
         },
 
         "processing": {
-            "required_operations": ["validate", "transform"],  # Требуемые операции
-            "priority": "normal",  # Приоритет обработки
-            "timeout_seconds": config.PROCESSING_TIMEOUT,  # Таймаут обработки
+            "required_operations": ["validate", "transform"],
+            "priority": "normal",
+            "timeout_seconds": config.PROCESSING_TIMEOUT,
             "expected_format": "json" if task.file_name.endswith('.json') else "html",
         },
 
         "recovery": {
-            "retry_count": 0,  # Счетчик попыток
-            "last_attempt": None,  # Последняя попытка
-            "original_message_id": task.processing_message_id,  # ID сообщения в Telegram
-            "bot_token_hash": hashlib.md5(config.TELEGRAM_BOT_TOKEN.encode()).hexdigest()[:8],  # Хеш токена для идентификации
+            "retry_count": 0,
+            "last_attempt": None,
+            "original_message_id": task.processing_message_id,
+            "bot_token_hash": hashlib.md5(config.TELEGRAM_BOT_TOKEN.encode()).hexdigest()[:8],
         },
 
         "metadata": {
@@ -428,7 +530,6 @@ async def send_to_kafka_input(task: ProcessingTask) -> bool:
     }
 
     try:
-
         await state_manager.save_kafka_message(
             task_id=task.task_id,
             topic=config.KAFKA_INPUT_TOPIC,
@@ -453,9 +554,6 @@ async def send_to_kafka_input(task: ProcessingTask) -> bool:
                    f"partition={record_metadata.partition}, "
                    f"offset={record_metadata.offset}")
 
-        logger.info(f"📤 Отправлено в Kafka INPUT topic:")
-        logger.info(json.dumps(kafka_message, indent=2, ensure_ascii=False))
-
         return True
 
     except Exception as e:
@@ -463,7 +561,7 @@ async def send_to_kafka_input(task: ProcessingTask) -> bool:
         raise
 
 async def start_kafka_consumer():
-    """Запускает Kafka Consumer для получения ответов"""
+    """Запускает асинхронный Kafka Consumer для получения ответов"""
     if not config.KAFKA_BOOTSTRAP_SERVERS:
         logger.warning("⚠️ Kafka bootstrap servers не указаны, consumer не запущен")
         return
@@ -474,10 +572,10 @@ async def start_kafka_consumer():
             config.KAFKA_OUTPUT_TOPIC,
             bootstrap_servers=config.KAFKA_BOOTSTRAP_SERVERS.split(','),
             group_id=config.KAFKA_CONSUMER_GROUP,
-            value_deserializer=lambda v: json.loads(v.decode('utf-8')),
+            value_deserializer=lambda v: json.loads(v.decode('utf-8')) if v else None,
             key_deserializer=lambda k: k.decode('utf-8') if k else None,
-            auto_offset_reset='earliest',  # Важно: читаем с начала при перезапуске
-            enable_auto_commit=False,  # Ручное подтверждение
+            auto_offset_reset='earliest',
+            enable_auto_commit=False,
             session_timeout_ms=30000,
             heartbeat_interval_ms=10000,
             max_poll_records=10,
@@ -491,101 +589,214 @@ async def start_kafka_consumer():
 
         while True:
             try:
+                # Используем asyncio.sleep для неблокирующего ожидания
+                await asyncio.sleep(0.1)
 
-                msg_pack = consumer.poll(timeout_ms=1000)
+                # Получаем сообщения с таймаутом
+                msg_pack = consumer.poll(timeout_ms=100)
 
                 for tp, messages in msg_pack.items():
                     for message in messages:
                         try:
+                            logger.info(f"📥 [CONSUMER] Получено сообщение для offset {message.offset}")
+
                             task_id = message.key
                             response_data = message.value
 
-                            logger.info(f"📥 Получен ответ из Kafka для задачи: {task_id}")
+                            if not response_data:
+                                logger.error(f"❌ [CONSUMER] Response_data пустой!")
+                                consumer.commit()
+                                continue
 
-                            await handle_kafka_response(task_id, response_data)
+                            # Если ключ пустой, берем из тела
+                            if not task_id:
+                                task_id = response_data.get('task_id')
+
+                            if not task_id:
+                                logger.error(f"❌ [CONSUMER] Не удалось извлечь task_id!")
+                                consumer.commit()
+                                continue
+
+                            logger.info(f"📥 [CONSUMER] Задача: {task_id}, статус: {response_data.get('status')}")
+
+                            # Создаем задачу для обработки
+                            asyncio.create_task(handle_kafka_response(task_id, response_data))
 
                             consumer.commit()
 
                         except Exception as e:
-                            logger.error(f"❌ Ошибка обработки сообщения Kafka: {e}")
+                            logger.error(f"❌ [CONSUMER] Ошибка обработки сообщения: {e}")
+                            logger.exception(e)
 
             except Exception as e:
-                logger.error(f"❌ Ошибка в Kafka Consumer: {e}")
+                logger.error(f"❌ [CONSUMER] Ошибка в цикле: {e}")
+                logger.exception(e)
+                await asyncio.sleep(1)  # Пауза при ошибке
 
     except NoBrokersAvailable:
         logger.error("❌ Не удалось подключиться к Kafka брокерам")
     except Exception as e:
         logger.error(f"❌ Не удалось запустить Kafka Consumer: {e}")
+        logger.exception(e)
     finally:
         if consumer:
             consumer.close()
 
+
+async def send_processed_file_to_user(task: ProcessingTask):
+    """Отправляет обработанный файл пользователю"""
+    try:
+        logger.info(f"📤 Отправка файла для задачи {task.task_id}")
+
+        if not task.processed_minio_path:
+            logger.error(f"❌ Нет пути к обработанному файлу")
+            await send_direct_message(task.chat_id, f"❌ Файл не найден: {task.file_name}")
+            return
+
+        # Скачиваем файл
+        file_content = await download_from_minio(task.processed_minio_path)
+
+        # Получаем расширение файла из пути
+        file_ext = os.path.splitext(task.processed_minio_path)[-1] or '.csv'
+        output_filename = f"processed_{task.task_id[:8]}{file_ext}"
+
+        file_obj = BufferedInputFile(file_content, filename=output_filename)
+
+        # Очень короткое описание
+        caption = f"✅ {task.file_name}"
+
+        # Создаем корутину для отправки файла
+        async def send_file_coro():
+            try:
+                await bot.send_document(
+                    chat_id=task.chat_id,
+                    document=file_obj,
+                    caption=caption[:1024]
+                )
+                logger.info(f"✅ Файл отправлен пользователю {task.user_id}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки файла: {e}")
+
+        # Запускаем в основном loop
+        if main_loop and main_loop != asyncio.get_event_loop():
+            asyncio.run_coroutine_threadsafe(send_file_coro(), main_loop)
+        else:
+            await send_file_coro()
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки файла: {e}")
+
+        # Отправляем уведомление об ошибке
+        await send_direct_message(
+            task.chat_id,
+            f"❌ Ошибка отправки файла: {task.file_name}"
+        )
+
 async def handle_kafka_response(task_id: str, response_data: Dict[str, Any]):
     """
     Обрабатывает ответ из Kafka OUTPUT topic.
-
-    ⚠️ ВАЖНО: Это тот JSON, который микросервис отправляет в ответ!
-    Пример ожидаемого ответа:
     """
     try:
-        logger.info(f"🔧 Обработка ответа Kafka для task_id={task_id}")
-        logger.info(f"📥 Получен ответ из Kafka OUTPUT topic:")
-        logger.info(json.dumps(response_data, indent=2, ensure_ascii=False))
+        logger.info(f"🔧 [handle_kafka_response] ======== НАЧАЛО ОБРАБОТКИ ========")
+        logger.info(f"🔧 [handle_kafka_response] Вызвана с task_id: {task_id}")
 
-        required_fields = ['task_id', 'status', 'event_timestamp']
-        for field in required_fields:
-            if field not in response_data:
-                logger.error(f"❌ В ответе Kafka отсутствует поле: {field}")
-                return
-
-        task_data = await state_manager.get_task(task_id)
-        if not task_data:
-            logger.error(f"❌ Задача {task_id} не найдена в БД")
+        # ПРОСТАЯ ПРОВЕРКА - функция ли вообще вызывается?
+        if not task_id:
+            logger.error(f"❌ [handle_kafka_response] Task ID пустой!")
             return
 
-        task = ProcessingTask.from_dict(task_data)
+        logger.info(f"🔧 [handle_kafka_response] Ищу задачу в БД...")
 
-        if response_data['status'] == "success":
+        # Простой поиск задачи
+        task_data = await state_manager.get_task(task_id)
+
+        if not task_data:
+            logger.error(f"❌ [handle_kafka_response] Задача {task_id} не найдена в БД!")
+
+            # Проверим, есть ли такая задача по части ID
+            if len(task_id) >= 8:
+                short_id = task_id[:8]
+                cursor = await state_manager.db.execute('''
+                    SELECT task_id FROM tasks WHERE task_id LIKE ? LIMIT 1
+                ''', (f'{short_id}%',))
+                row = await cursor.fetchone()
+                if row:
+                    logger.info(f"🔧 [handle_kafka_response] Нашлась задача по частичному ID: {row[0]}")
+                    # Получаем полные данные
+                    task_data = await state_manager.get_task(row[0])
+                    task_id = row[0]  # Обновляем ID
+                else:
+                    logger.error(f"❌ [handle_kafka_response] Задача не найдена даже по частичному ID!")
+                    return
+            else:
+                return
+
+        # Преобразуем в ProcessingTask
+        task = ProcessingTask.from_dict(task_data)
+        logger.info(f"✅ [handle_kafka_response] Задача найдена: {task.file_name} для пользователя {task.user_id}")
+
+        # ПРОСТАЯ ОБРАБОТКА СТАТУСА
+        status = response_data.get('status', '').lower()
+        logger.info(f"🔧 [handle_kafka_response] Статус обработки: {status}")
+
+        if status == 'success':
+            # Обновляем задачу
             task.status = TaskStatus.COMPLETED
             task.completed_at = datetime.now()
             task.kafka_response_received = True
 
-            if 'output' in response_data and 'file_path' in response_data['output']:
-                task.processed_minio_path = response_data['output']['file_path']
+            # Сохраняем путь к файлу
+            output_path = response_data.get('output', {}).get('file_path')
+            if output_path:
+                task.processed_minio_path = output_path
+                logger.info(f"📁 [handle_kafka_response] Путь к файлу: {output_path}")
 
-                await send_processed_file_to_user(task)
-            else:
+            await state_manager.save_task(task)
 
-                await update_processing_message(
-                    task.chat_id,
-                    task.processing_message_id,
-                    f"✅ Обработка завершена успешно!\n\n"
-                    f"📋 Результаты:\n{json.dumps(response_data.get('results', {}), indent=2, ensure_ascii=False)[:500]}"
+            # Отправляем уведомление
+            message = f"✅ Обработка завершена: {task.file_name}"
+            logger.info(f"📤 [handle_kafka_response] Отправляю сообщение: {message}")
+
+            # ПРОСТАЯ ОТПРАВКА
+            try:
+                await bot.send_message(
+                    chat_id=task.chat_id,
+                    text=message,
+                    parse_mode=ParseMode.HTML
                 )
+                logger.info(f"✅ [handle_kafka_response] Сообщение отправлено!")
+            except Exception as send_error:
+                logger.error(f"❌ [handle_kafka_response] Ошибка отправки: {send_error}")
 
-        elif response_data['status'] == "error":
-            task.status = TaskStatus.FAILED
-            task.error_message = response_data.get('error_message', 'Unknown error')
-            task.kafka_response_received = True
+            # Если нужно отправить файл
+            if response_data.get('notifications', {}).get('should_send_file', True) and task.processed_minio_path:
+                logger.info(f"📤 [handle_kafka_response] Отправляю файл...")
+                await send_processed_file_to_user(task)
 
-            await update_processing_message(
-                task.chat_id,
-                task.processing_message_id,
-                f"❌ Ошибка обработки:\n{task.error_message}"
-            )
         else:
-            logger.warning(f"⚠️ Неизвестный статус в ответе Kafka: {response_data['status']}")
-            return
+            logger.warning(f"⚠️ [handle_kafka_response] Неуспешный статус: {status}")
+            task.status = TaskStatus.FAILED
+            task.error_message = f"Статус: {status}"
+            task.kafka_response_received = True
+            await state_manager.save_task(task)
 
-        await state_manager.save_task(task)
-        await state_manager.mark_kafka_response_received(task_id)
+            # Отправляем уведомление об ошибке
+            error_msg = f"❌ Ошибка обработки: {task.file_name}"
+            await bot.send_message(chat_id=task.chat_id, text=error_msg)
 
-        if task_id in active_tasks and task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
-            del active_tasks[task_id]
+        # Помечаем ответ полученным
+        await state_manager.mark_kafka_response_received(task.task_id)
+        logger.info(f"✅ [handle_kafka_response] Ответ помечен как полученный")
+
+        # Удаляем из активных задач
+        if task.task_id in active_tasks:
+            del active_tasks[task.task_id]
+
+        logger.info(f"🎉 [handle_kafka_response] ОБРАБОТКА ЗАВЕРШЕНА УСПЕШНО!")
 
     except Exception as e:
-        logger.error(f"❌ Ошибка в handle_kafka_response: {e}")
-
+        logger.error(f"❌ [handle_kafka_response] КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        logger.exception(e)
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
@@ -600,7 +811,7 @@ async def cmd_start(message: Message):
         "/status - статус системы\n"
         "/tasks - мои задачи\n"
         "/retry <id> - повторить задачу\n"
-        "/cancel <id> - отменить задачу"
+        "/check <id> - проверить задачу"
     )
 
 @dp.message(Command("status"))
@@ -627,7 +838,7 @@ async def cmd_status(message: Message):
     pending_tasks = await state_manager.get_pending_tasks()
     if pending_tasks:
         status_text += f"\n🔄 Незавершенных задач: {len(pending_tasks)}"
-        for task_id in pending_tasks[:3]:  # Показываем первые 3
+        for task_id in pending_tasks[:3]:
             status_text += f"\n   • {task_id[:8]}..."
 
     await message.answer(status_text)
@@ -653,7 +864,10 @@ async def cmd_tasks(message: Message):
     tasks_text = "📋 Ваши последние задачи:\n\n"
 
     for i, row in enumerate(rows, 1):
-        task = dict(row)
+        # Получаем названия колонок
+        columns = [description[0] for description in cursor.description]
+        task = dict(zip(columns, row))
+
         task_id_short = task['task_id'][:8]
         status_icon = {
             'completed': '✅',
@@ -673,6 +887,50 @@ async def cmd_tasks(message: Message):
         tasks_text += "\n"
 
     await message.answer(tasks_text)
+
+@dp.message(Command("check"))
+async def cmd_check(message: Message):
+    """Проверить статус задачи"""
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("❌ Укажите ID задачи: /check <task_id>")
+        return
+
+    task_id = args[1]
+    task_data = await state_manager.get_task(task_id)
+
+    if not task_data:
+        await message.answer(f"❌ Задача {task_id} не найдена")
+        return
+
+    task = ProcessingTask.from_dict(task_data)
+
+    status_info = {
+        TaskStatus.PENDING: "⏳ Ожидает",
+        TaskStatus.PROCESSING: "🔄 Обрабатывается",
+        TaskStatus.COMPLETED: "✅ Завершена",
+        TaskStatus.FAILED: "❌ Ошибка",
+        TaskStatus.TIMEOUT: "⏰ Таймаут"
+    }
+
+    status_text = status_info.get(task.status, "❓ Неизвестно")
+
+    response = (
+        f"🔍 <b>Статус задачи</b>\n\n"
+        f"📋 <b>ID:</b> <code>{task.task_id}</code>\n"
+        f"📄 <b>Файл:</b> {task.file_name}\n"
+        f"📊 <b>Статус:</b> {status_text}\n"
+        f"👤 <b>Пользователь:</b> {task.user_id}\n"
+        f"🕐 <b>Создано:</b> {task.created_at.strftime('%H:%M:%S') if task.created_at else 'N/A'}\n"
+    )
+
+    if task.error_message:
+        response += f"\n❌ <b>Ошибка:</b> {task.error_message[:200]}"
+
+    if task.processed_minio_path:
+        response += f"\n📁 <b>Результат:</b> {task.processed_minio_path}"
+
+    await message.answer(response)
 
 @dp.message(Command("retry"))
 async def cmd_retry(message: Message):
@@ -715,6 +973,28 @@ async def cmd_retry(message: Message):
         logger.error(f"❌ Ошибка при повторной отправке: {e}")
         await message.answer(f"❌ Ошибка: {str(e)[:200]}")
 
+@dp.message(Command("debug_db"))
+async def cmd_debug_db(message: Message):
+    """Отладка БД"""
+    cursor = await state_manager.db.execute('''
+        SELECT task_id, file_name, user_id, chat_id, status, created_at
+        FROM tasks
+        ORDER BY created_at DESC
+        LIMIT 20
+    ''')
+
+    rows = await cursor.fetchall()
+
+    response = "📋 <b>Последние 20 задач в БД:</b>\n\n"
+    for i, row in enumerate(rows, 1):
+        response += f"{i}. <code>{row[0]}</code>\n"
+        response += f"   📄 {row[1]}\n"
+        response += f"   👤 {row[2]} (чат: {row[3]})\n"
+        response += f"   📊 {row[4]}\n"
+        response += f"   🕐 {row[5]}\n\n"
+
+    await message.answer(response[:4000])
+
 @dp.message(F.document)
 async def handle_document(message: Message):
     """Обработка документов"""
@@ -722,12 +1002,15 @@ async def handle_document(message: Message):
     chat_id = message.chat.id
     file_name = message.document.file_name
 
+    logger.info(f"📥 [handle_document] Получен файл: {file_name} от user_id={user_id}, chat_id={chat_id}")
+
+
     if not (file_name.endswith('.json') or file_name.endswith('.html')):
         await message.answer("❌ Отправьте только JSON (.json) или HTML (.html) файлы")
         return
 
     if message.document.file_size > config.MAX_FILE_SIZE:
-        await message.answer(f"❌ Файл слишком большой. Максимальный размер: {config.MAX_FILE_SIZE // 1048576} MB")
+        await message.answer(f"❌ Файл слишком большой. Максимальный размер: {config.MAX_FILE_SIZE // 209715200} MB")
         return
 
     task_id = str(uuid.uuid4())
@@ -751,7 +1034,6 @@ async def handle_document(message: Message):
     await state_manager.save_task(task)
 
     try:
-
         file_info = await bot.get_file(message.document.file_id)
         downloaded_file = await bot.download_file(file_info.file_path)
         file_content = downloaded_file.read()
@@ -795,7 +1077,6 @@ async def handle_document(message: Message):
             asyncio.create_task(check_processing_timeout(task_id))
 
         else:
-
             await processing_msg.edit_text(
                 f"⚠️ Kafka недоступен, запускаю эмуляцию обработки...\n"
                 f"📋 ID задачи: <code>{task_id}</code>"
@@ -815,54 +1096,6 @@ async def handle_document(message: Message):
             f"📋 ID задачи: <code>{task_id}</code>"
         )
 
-async def send_processed_file_to_user(task: ProcessingTask):
-    """Отправляет обработанный файл пользователю"""
-    try:
-
-        file_content = await download_from_minio(task.processed_minio_path)
-
-        file_obj = BufferedInputFile(file_content, filename=f"processed_{task.file_name}")
-
-        await bot.send_document(
-            chat_id=task.chat_id,
-            document=file_obj,
-            caption=(
-                f"✅ Обработка завершена!\n\n"
-                f"📄 Файл: {task.file_name}\n"
-                f"📋 ID задачи: <code>{task.task_id}</code>\n"
-                f"⏱️ Время обработки: {(task.completed_at - task.started_at).total_seconds():.1f} сек\n"
-                f"📁 Результат: {task.processed_minio_path}"
-            )
-        )
-
-        await update_processing_message(
-            task.chat_id,
-            task.processing_message_id,
-            f"✅ Обработка завершена!\nФайл отправлен в чат."
-        )
-
-        logger.info(f"✅ Файл отправлен пользователю {task.user_id}: {task.file_name}")
-
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки файла пользователю: {e}")
-
-        await update_processing_message(
-            task.chat_id,
-            task.processing_message_id,
-            f"❌ Ошибка отправки файла:\n{str(e)[:200]}"
-        )
-
-async def update_processing_message(chat_id: int, message_id: Optional[int], text: str):
-    """Обновляет сообщение о статусе обработки"""
-    if message_id:
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text
-            )
-        except Exception as e:
-            logger.error(f"❌ Ошибка обновления сообщения: {e}")
 
 async def check_processing_timeout(task_id: str):
     """Проверяет таймаут обработки задачи"""
@@ -875,11 +1108,9 @@ async def check_processing_timeout(task_id: str):
             task.error_message = f"Таймаут обработки ({config.PROCESSING_TIMEOUT} сек)"
             await state_manager.save_task(task)
 
-            await update_processing_message(
+            await send_direct_message(
                 task.chat_id,
-                task.processing_message_id,
-                f"❌ Таймаут обработки!\nЗадача не была обработана за {config.PROCESSING_TIMEOUT} секунд.\n"
-                f"Используйте /retry {task_id} для повторной отправки."
+                f"❌ Таймаут обработки: {task.file_name}"
             )
 
             logger.warning(f"⚠️ Таймаут обработки для задачи {task_id}")
@@ -887,7 +1118,6 @@ async def check_processing_timeout(task_id: str):
 async def emulate_processing(task: ProcessingTask, original_content: bytes):
     """Эмуляция обработки файла (если Kafka недоступен)"""
     try:
-
         await asyncio.sleep(3)
 
         if task.file_name.endswith('.json'):
@@ -898,7 +1128,6 @@ async def emulate_processing(task: ProcessingTask, original_content: bytes):
                     "task_id": task.task_id,
                     "processed_at": datetime.now().isoformat(),
                     "processing_type": "emulation",
-                    "note": "Это эмуляция обработки. В реальной системе здесь будет результат микросервиса."
                 },
                 "original_data": data,
                 "statistics": {
@@ -908,7 +1137,7 @@ async def emulate_processing(task: ProcessingTask, original_content: bytes):
             }
             processed_content = json.dumps(processed_data, indent=2, ensure_ascii=False).encode('utf-8')
         else:
-            processed_content = f"<!-- Emulated processing for task {task.task_id} -->\n{original_content.decode('utf-8')}".encode('utf-8')
+            processed_content = f"<!-- Emulated processing -->\n{original_content.decode('utf-8')}".encode('utf-8')
 
         output_name = f"processed_{task.file_name}"
         output_path = await upload_to_minio(
@@ -933,10 +1162,9 @@ async def emulate_processing(task: ProcessingTask, original_content: bytes):
         task.error_message = str(e)
         await state_manager.save_task(task)
 
-        await update_processing_message(
+        await send_direct_message(
             task.chat_id,
-            task.processing_message_id,
-            f"❌ Ошибка эмуляции обработки:\n{str(e)[:200]}"
+            f"❌ Ошибка эмуляции обработки: {task.file_name}"
         )
 
 async def recover_pending_tasks():
@@ -966,12 +1194,10 @@ async def recover_pending_tasks():
             if task.kafka_message_sent and not task.kafka_response_received:
                 logger.info(f"🔄 Восстанавливаю задачу: {task_id}")
 
-                await update_processing_message(
+                await send_direct_message(
                     task.chat_id,
-                    task.processing_message_id,
                     f"🔄 Восстановление задачи после перезапуска...\n"
-                    f"📋 ID: <code>{task_id}</code>\n"
-                    f"⏳ Ожидание ответа от микросервиса..."
+                    f"📋 ID: {task_id[:8]}..."
                 )
 
                 remaining_time = config.PROCESSING_TIMEOUT - time_since_created
@@ -988,33 +1214,47 @@ async def check_processing_timeout_with_delay(task_id: str, delay: float):
 
 
 async def main():
-    """Основная функция"""
-    logger.info("🚀 Запуск бота с Kafka и восстановлением состояния...")
+     """Основная функция"""
+     logger.info("🚀 Запуск бота с Kafka и восстановлением состояния...")
 
-    await state_manager.init()
+     # Устанавливаем основной event loop
+     set_main_loop(asyncio.get_event_loop())
 
-    await recover_pending_tasks()
+     await state_manager.init()
 
-    try:
-        bot_info = await bot.get_me()
-        logger.info(f"✅ Бот: @{bot_info.username} ({bot_info.first_name})")
-    except Exception as e:
-        logger.error(f"❌ Ошибка подключения к боту: {e}")
-        return
+     await recover_pending_tasks()
 
-    if config.KAFKA_BOOTSTRAP_SERVERS and kafka_producer:
-        import threading
-        consumer_thread = threading.Thread(
-            target=lambda: asyncio.run(start_kafka_consumer()),
-            daemon=True
-        )
-        consumer_thread.start()
-        logger.info("✅ Kafka Consumer запущен в отдельном потоке")
+     try:
+         bot_info = await bot.get_me()
+         logger.info(f"✅ Бот: @{bot_info.username} ({bot_info.first_name})")
+     except Exception as e:
+         logger.error(f"❌ Ошибка подключения к боту: {e}")
+         return
 
-    logger.info("✅ Бот готов к работе!")
-    logger.info(f"📊 Активных задач: {len(active_tasks)}")
+     # ✅ ВАЖНО: Запускаем Kafka Consumer как фоновую задачу
+     if config.KAFKA_BOOTSTRAP_SERVERS:
+         logger.info("✅ Запускаю Kafka Consumer как фоновую задачу...")
+         consumer_task = asyncio.create_task(start_kafka_consumer())
+         logger.info(f"✅ Kafka Consumer запущен как фоновая задача")
 
-    await dp.start_polling(bot)
+     logger.info("✅ Бот готов к работе!")
+     logger.info(f"📊 Активных задач: {len(active_tasks)}")
+
+     try:
+         await dp.start_polling(bot)
+     finally:
+         # Закрываем соединения
+         logger.info("🛑 Останавливаю бота...")
+         await state_manager.close()
+         if kafka_producer:
+             kafka_producer.close()
+         # Отменяем задачу consumer
+         if 'consumer_task' in locals():
+             consumer_task.cancel()
+             try:
+                 await consumer_task
+             except asyncio.CancelledError:
+                 logger.info("✅ Kafka Consumer остановлен")
 
 if __name__ == "__main__":
     try:
@@ -1023,8 +1263,3 @@ if __name__ == "__main__":
         logger.info("👋 Бот остановлен")
     except Exception as e:
         logger.error(f"💥 Критическая ошибка: {e}")
-    finally:
-
-        asyncio.run(state_manager.close())
-        if kafka_producer:
-            kafka_producer.close()
