@@ -7,9 +7,6 @@ services:
       context: .
       dockerfile: ./python/Dockerfile
     container_name: python-bot
-    volumes:
-      - ./python/bot.log:/app/bot.log
-      - ./python/bot_state.db:/app/bot_state.db
     environment:
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
       MINIO_ENDPOINT: "minio:9000"

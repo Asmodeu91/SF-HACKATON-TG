@@ -816,6 +816,36 @@ async def merge_html_files(file_paths: List[str], file_names: List[str]) -> byte
 
         return error_html.encode('utf-8')
 
+@dp.message(Command("format"))
+async def cmd_format(message: Message):
+    """Показывает формат выходных данных"""
+    await message.answer(
+        "📊 <b>Формат CSV отчета анализа чата Telegram</b>\n\n"
+
+        "<b>👥 Базовая структура:</b>\n"
+        "<code>username | full_name | message_count | message_percentage</code>\n\n"
+
+        "<b>📋 Описание колонок:</b>\n"
+        "1. <b>👤 Никнейм</b> - имя пользователя (@username)\n"
+        "2. <b>📛 ФИО</b> - полное имя из профиля\n"
+        "3. <b>📊 Количество</b> - число сообщений пользователя\n"
+        "4. <b>📈 Процент</b> - доля сообщений пользователя от общего числа\n\n"
+
+        "<b>📈 Дополнительная статистика:</b>\n"
+        "• Топ-5 самых активных участников\n"
+        "• Общее количество сообщений в чате\n"
+        "• Распределение активности\n"
+        "• Процент сообщений от топ-10% участников\n\n"
+
+        "<b>📁 Пример данных:</b>\n"
+        "<pre>"
+        "john_doe      | John Doe     | 1245 | 12.3%\n"
+        "alice_smith   | Alice Smith  | 876  | 8.7%\n"
+        "bob_johnson   | Bob Johnson  | 543  | 5.4%\n"
+        "...\n"
+        "</pre>",
+        parse_mode=ParseMode.HTML
+    )
 
 async def send_csv_content_to_chat(chat_id: int, csv_content: bytes, task_id: str = None, max_rows: int = 50):
     """
@@ -837,9 +867,12 @@ async def send_csv_content_to_chat(chat_id: int, csv_content: bytes, task_id: st
 
         # Определяем разделитель
         delimiter = ','
-        if ';' in csv_text.split('\n')[0]:
+        first_line = csv_text.split('\n')[0]
+        if '|' in first_line:
+            delimiter = '|'
+        elif ';' in first_line:
             delimiter = ';'
-        elif '\t' in csv_text.split('\n')[0]:
+        elif '\t' in first_line:
             delimiter = '\t'
 
         # Читаем CSV
@@ -850,133 +883,201 @@ async def send_csv_content_to_chat(chat_id: int, csv_content: bytes, task_id: st
             # Пробуем без указания разделителя
             df = pd.read_csv(StringIO(csv_text))
 
+        # Переименовываем колонки для стандартного формата
+        column_mapping = {}
+        if len(df.columns) >= 4:
+            # Пробуем определить формат автоматически
+            for i, col in enumerate(df.columns):
+                col_lower = str(col).lower()
+                if any(x in col_lower for x in ['user', 'ник', 'username', 'логин']):
+                    column_mapping[col] = '👤 Никнейм'
+                elif any(x in col_lower for x in ['name', 'имя', 'фио', 'full']):
+                    column_mapping[col] = '📛 ФИО'
+                elif any(x in col_lower for x in ['count', 'количество', 'кол-во', 'сообщен']):
+                    column_mapping[col] = '📊 Количество'
+                elif any(x in col_lower for x in ['percent', 'процент', '%', 'доля']):
+                    column_mapping[col] = '📈 Процент'
+                else:
+                    column_mapping[col] = f'Колонка {i+1}'
+        else:
+            # Просто нумеруем колонки
+            column_mapping = {col: f'Колонка {i+1}' for i, col in enumerate(df.columns)}
+
+        df = df.rename(columns=column_mapping)
+
         # Базовая информация
         total_rows = len(df)
         total_cols = len(df.columns)
 
         info_message = (
-            f"📊 <b>CSV файл проанализирован</b>\n\n"
-            f"📈 <b>Всего строк:</b> {total_rows:,}\n"
-            f"📋 <b>Колонок:</b> {total_cols}\n"
-            f"🔢 <b>Разделитель:</b> {delimiter}\n"
+            f"📊 <b>Анализ чата Telegram</b>\n\n"
+            f"📈 <b>Всего участников:</b> {total_rows:,}\n"
+            f"📋 <b>Колонок в отчете:</b> {total_cols}\n"
         )
 
         if task_id:
             info_message += f"📋 <b>ID задачи:</b> <code>{task_id}</code>\n"
 
-        # Показываем колонки
-        info_message += f"\n<b>📋 Список колонок:</b>\n"
-        for i, col in enumerate(df.columns, 1):
-            dtype = str(df[col].dtype)
-            non_null = df[col].notna().sum()
-            info_message += f"{i}. <code>{col}</code> ({dtype}, {non_null}/{total_rows} заполнены)\n"
+        # Показываем формат колонок
+        info_message += f"\n<b>📋 Формат данных:</b>\n"
+        for i, (old_col, new_col) in enumerate(column_mapping.items(), 1):
+            info_message += f"{i}. {new_col}\n"
 
         await send_direct_message(chat_id, info_message)
 
-        # Если мало строк, показываем всю таблицу
-        if total_rows <= max_rows and total_cols <= 10:
-            # Формируем Markdown таблицу
-            table_message = "<b>📋 Полное содержимое:</b>\n\n"
+        # Если есть колонки с количеством и процентом, добавляем статистику
+        if '📊 Количество' in df.columns and '📈 Процент' in df.columns:
+            try:
+                total_messages = df['📊 Количество'].sum()
+                top_users = df.nlargest(5, '📊 Количество')
 
-            # Заголовок
-            headers = "| " + " | ".join(df.columns.astype(str)) + " |\n"
-            separator = "|" + "|".join(["---"] * len(df.columns)) + "|\n"
+                stats_message = "<b>📈 Топ-5 самых активных участников:</b>\n\n"
+                for idx, (_, row) in enumerate(top_users.iterrows(), 1):
+                    username = str(row.get('👤 Никнейм', 'N/A'))[:20]
+                    full_name = str(row.get('📛 ФИО', 'N/A'))[:30]
+                    count = int(row['📊 Количество']) if pd.notna(row['📊 Количество']) else 0
+                    percent = float(row['📈 Процент']) if pd.notna(row['📈 Процент']) else 0
 
-            table_message += "<pre>" + headers + separator
+                    stats_message += (
+                        f"{idx}. <b>{username}</b>\n"
+                        f"   📛 {full_name}\n"
+                        f"   📊 Сообщений: {count:,}\n"
+                        f"   📈 Доля: {percent:.1f}%\n"
+                    )
 
-            # Данные (первые max_rows строк)
+                stats_message += f"\n<b>📊 Всего сообщений в чате:</b> {total_messages:,}"
+                await send_direct_message(chat_id, stats_message)
+            except Exception as stats_error:
+                logger.error(f"❌ Ошибка расчета статистики: {stats_error}")
+
+        # Показываем таблицу участников
+        if total_rows <= max_rows and total_cols <= 6:
+            # Форматируем таблицу для показа в чате
+            table_message = "<b>📋 Список участников:</b>\n\n"
+
+            # Создаем компактную таблицу
+            headers = []
+            for col in df.columns:
+                if col == '👤 Никнейм':
+                    headers.append("👤")
+                elif col == '📛 ФИО':
+                    headers.append("📛")
+                elif col == '📊 Количество':
+                    headers.append("📊")
+                elif col == '📈 Процент':
+                    headers.append("%")
+                else:
+                    headers.append(col[:2])
+
+            table_message += "<pre>" + " | ".join(headers) + "\n"
+            table_message += "-" * (len(" | ".join(headers))) + "\n"
+
             for _, row in df.head(max_rows).iterrows():
-                row_str = "| " + " | ".join([
-                    str(val)[:50].replace('\n', ' ') if pd.notna(val) else "NULL"
-                    for val in row.values
-                ]) + " |\n"
-                table_message += row_str
+                row_values = []
+                for col in df.columns:
+                    val = row[col]
+                    if pd.isna(val):
+                        row_values.append("—")
+                    elif col == '👤 Никнейм':
+                        row_values.append(str(val)[:15])
+                    elif col == '📛 ФИО':
+                        row_values.append(str(val)[:20])
+                    elif col == '📊 Количество':
+                        row_values.append(f"{int(val):,}")
+                    elif col == '📈 Процент':
+                        row_values.append(f"{float(val):.1f}%")
+                    else:
+                        row_values.append(str(val)[:10])
+
+                table_message += " | ".join(row_values) + "\n"
 
             table_message += "</pre>"
 
             if total_rows < max_rows:
-                table_message += f"\n✅ Показаны все {total_rows} строк"
+                table_message += f"\n✅ Показаны все {total_rows} участников"
 
             await send_direct_message(chat_id, table_message[:4000])
 
-        elif total_rows <= 1000:
-            # Для средних файлов показываем статистику и первые строки
-            stats_message = "<b>📈 Статистика (первые 10 строк):</b>\n\n"
+        elif total_rows <= 100:
+            # Показываем топ-15 для средних чатов
+            top_message = "<b>📋 Топ-15 участников по активности:</b>\n\n"
 
-            # Показываем первые 10 строк
-            preview_df = df.head(10)
+            # Сортируем по количеству сообщений если есть такая колонка
+            if '📊 Количество' in df.columns:
+                top_df = df.nlargest(15, '📊 Количество')
+            else:
+                top_df = df.head(15)
 
-            # Формируем компактную таблицу
-            preview_headers = "| " + " | ".join(preview_df.columns.astype(str)) + " |\n"
-            preview_separator = "|" + "|".join(["---"] * len(preview_df.columns)) + "|\n"
+            top_message += "<pre>"
+            top_message += "№  | 👤 Никнейм           | 📊 Сообщений | %\n"
+            top_message += "---|----------------------|--------------|-----\n"
 
-            stats_message += "<pre>" + preview_headers + preview_separator
+            for idx, (_, row) in enumerate(top_df.iterrows(), 1):
+                username = str(row.get('👤 Никнейм', '—'))[:20]
+                count = int(row.get('📊 Количество', 0)) if pd.notna(row.get('📊 Количество', 0)) else 0
+                percent = float(row.get('📈 Процент', 0)) if pd.notna(row.get('📈 Процент', 0)) else 0
 
-            for _, row in preview_df.iterrows():
-                row_str = "| " + " | ".join([
-                    str(val)[:30].replace('\n', ' ') if pd.notna(val) else "NULL"
-                    for val in row.values
-                ]) + " |\n"
-                stats_message += row_str
+                top_message += f"{idx:2d} | {username:20s} | {count:12,} | {percent:4.1f}%\n"
 
-            stats_message += "</pre>"
-
-            # Добавляем статистику по числовым колонкам
-            numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
-            if len(numeric_cols) > 0:
-                stats_message += f"\n<b>📊 Статистика по числовым колонкам:</b>\n"
-                for col in numeric_cols[:3]:  # Первые 3 числовые колонки
-                    stats = df[col].describe()
-                    stats_message += (
-                        f"\n<b>{col}:</b>\n"
-                        f"  Среднее: {stats.get('mean', 0):.2f}\n"
-                        f"  Мин: {stats.get('min', 0):.2f}\n"
-                        f"  Макс: {stats.get('max', 0):.2f}\n"
-                        f"  Медиана: {stats.get('50%', 0):.2f}\n"
-                    )
-
-            await send_direct_message(chat_id, stats_message[:4000])
-
-            # Предупреждение о большом размере
-            if total_rows > max_rows:
-                await send_direct_message(
-                    chat_id,
-                    f"⚠️ <b>Файл содержит {total_rows:,} строк</b>\n"
-                    f"Показаны только первые 10 строк.\n"
-                    f"Используйте полную версию для просмотра всех данных."
-                )
+            top_message += "</pre>"
+            await send_direct_message(chat_id, top_message[:4000])
 
         else:
-            # Для очень больших файлов только статистика
-            stats_message = f"<b>📈 Очень большой CSV файл ({total_rows:,} строк)</b>\n\n"
+            # Для очень больших чатов только статистика
+            large_message = f"<b>📊 Большой чат: {total_rows:,} участников</b>\n\n"
 
-            # Информация о типах данных
-            dtypes = df.dtypes.value_counts()
-            stats_message += "<b>Типы данных:</b>\n"
-            for dtype, count in dtypes.items():
-                stats_message += f"  {dtype}: {count} колонок\n"
+            if '📊 Количество' in df.columns:
+                total_messages = df['📊 Количество'].sum()
+                avg_messages = df['📊 Количество'].mean()
+                median_messages = df['📊 Количество'].median()
 
-            # Информация о пропущенных значениях
-            missing_percent = (df.isnull().sum() / len(df) * 100)
-            high_missing = missing_percent[missing_percent > 50]
-            if len(high_missing) > 0:
-                stats_message += f"\n⚠️ <b>Колонки с >50% пропусков:</b>\n"
-                for col, percent in high_missing.items():
-                    stats_message += f"  {col}: {percent:.1f}%\n"
+                large_message += (
+                    f"📈 <b>Статистика сообщений:</b>\n"
+                    f"  • Всего сообщений: {total_messages:,}\n"
+                    f"  • Среднее на участника: {avg_messages:.1f}\n"
+                    f"  • Медиана сообщений: {median_messages:.1f}\n\n"
+                )
 
-            await send_direct_message(chat_id, stats_message)
+            # Распределение активности
+            if '📈 Процент' in df.columns:
+                active_users = len(df[df['📈 Процент'] > 0])
+                top_10_percent = df.nlargest(max(1, total_rows // 10), '📊 Количество')['📈 Процент'].sum() if '📊 Количество' in df.columns else 0
 
-        logger.info(f"✅ Содержимое CSV отправлено в чат {chat_id}")
+                large_message += (
+                    f"👥 <b>Распределение активности:</b>\n"
+                    f"  • Активных участников: {active_users:,}\n"
+                    f"  • Топ 10% участников: {top_10_percent:.1f}% сообщений\n"
+                )
+
+            await send_direct_message(chat_id, large_message)
+
+        logger.info(f"✅ Анализ чата отправлен в чат {chat_id}")
         return True
 
     except Exception as e:
-        logger.error(f"❌ Ошибка при отправке содержимого CSV: {e}")
-        await send_direct_message(
-            chat_id,
-            f"❌ Не удалось проанализировать CSV файл: {str(e)[:200]}"
-        )
-        return False
+        logger.error(f"❌ Ошибка при анализе CSV чата: {e}")
+        logger.exception(e)
 
+        # Fallback: показать сырые данные
+        try:
+            csv_preview = csv_text.split('\n')[:10]
+            preview_text = "\n".join(csv_preview)
+
+            await send_direct_message(
+                chat_id,
+                f"📄 <b>Содержимое CSV файла (первые 10 строк):</b>\n\n"
+                f"<pre>{preview_text[:2000]}</pre>\n\n"
+                f"📋 <b>ID задачи:</b> <code>{task_id}</code>\n"
+                f"⚠️ <b>Примечание:</b> Автоформатирование не сработало"
+            )
+        except Exception as fallback_error:
+            await send_direct_message(
+                chat_id,
+                f"❌ Не удалось проанализировать файл отчета\n"
+                f"Ошибка: {str(e)[:200]}"
+            )
+
+        return False
 
 def clean_html_content(content: str) -> str:
     """
@@ -1588,18 +1689,52 @@ async def handle_kafka_response(task_id: str, response_data: Dict[str, Any]):
             telegram_chat_id = notifications.get('telegram_chat_id', task.chat_id)
             telegram_message_id = notifications.get('telegram_message_id', task.processing_message_id)
 
-            message = f"✅ Обработка завершена: {task.file_name}"
+            # Формируем информационное сообщение
+            message = f"✅ <b>Анализ чата завершен</b>\n📄 Файл: {task.file_name}"
             if task.is_group_task:
-                message = f"✅ Объединение и обработка завершены: {task.file_name}"
+                message = f"✅ <b>Объединение и анализ завершены</b>\n📄 Файл: {task.file_name}"
 
-            # Добавляем информацию о записях
+            # Добавляем информацию о записях из results
             results = response_data.get('results', {})
             if results:
                 analysis = results.get('analysis', {})
                 if analysis:
                     record_count = analysis.get('record_count')
                     if record_count is not None:
-                        message += f"\n📊 Обработано записей: {record_count}"
+                        message += f"\n👥 <b>Участников проанализировано:</b> {record_count:,}"
+
+                    # Добавляем информацию о полях
+                    field_count = analysis.get('field_count')
+                    if field_count is not None:
+                        message += f"\n📋 <b>Колонок в отчете:</b> {field_count}"
+
+                transformation = results.get('transformation', {})
+                if transformation:
+                    records_processed = transformation.get('records_processed')
+                    if records_processed is not None:
+                        message += f"\n📊 <b>Сообщений обработано:</b> {records_processed:,}"
+
+                    records_transformed = transformation.get('records_transformed')
+                    if records_transformed is not None:
+                        message += f"\n🔄 <b>Сообщений преобразовано:</b> {records_transformed:,}"
+
+                # Добавляем информацию о валидации
+                validation = results.get('validation', {})
+                if validation:
+                    validation_status = validation.get('status')
+                    if validation_status == 'valid':
+                        message += "\n✅ <b>Валидация:</b> Успешно"
+                    else:
+                        message += f"\n⚠️ <b>Валидация:</b> {validation_status}"
+
+            # Добавляем информацию о времени обработки
+            processing_time_ms = response_data.get('processing_time_ms')
+            if processing_time_ms is not None:
+                processing_time_sec = processing_time_ms / 1000
+                message += f"\n⏱️ <b>Время обработки:</b> {processing_time_sec:.2f} сек"
+
+            # Добавляем ID задачи
+            message += f"\n📋 <b>ID задачи:</b> <code>{task.task_id}</code>"
 
             try:
                 await bot.send_message(
@@ -1610,6 +1745,8 @@ async def handle_kafka_response(task_id: str, response_data: Dict[str, Any]):
                 logger.info(f"✅ [handle_kafka_response] Сообщение отправлено!")
             except Exception as send_error:
                 logger.error(f"❌ [handle_kafka_response] Ошибка отправки: {send_error}")
+                # Пробуем отправить через HTTP API
+                send_telegram_message_sync(telegram_chat_id, message)
 
             # Проверяем, нужно ли отправлять файл
             if should_send_file and task.processed_minio_path:
@@ -1621,46 +1758,129 @@ async def handle_kafka_response(task_id: str, response_data: Dict[str, Any]):
                 if task.processed_minio_path and task.processed_minio_path.endswith('.csv'):
                     try:
                         file_content = await download_from_minio(task.processed_minio_path)
+
+                        # Отправляем уведомление о режиме показа
+                        await send_direct_message(
+                            telegram_chat_id,
+                            f"📄 <b>Режим просмотра содержимого</b>\n\n"
+                            f"Файл будет показан в чате (не отправлен как документ)\n"
+                            f"По запросу бэкенда (should_send_file=false)"
+                        )
+
+                        # Показываем содержимое CSV
                         await send_csv_content_to_chat(
                             chat_id=telegram_chat_id,
                             csv_content=file_content,
                             task_id=task.task_id
                         )
+
                         # После показа содержимого удаляем файл
                         await cleanup_minio_file(task.processed_minio_path)
+
                     except Exception as e:
                         logger.error(f"❌ Ошибка при показе CSV содержимого: {e}")
+                        await send_direct_message(
+                            telegram_chat_id,
+                            f"❌ Не удалось показать содержимое CSV файла: {str(e)[:200]}"
+                        )
                 elif not should_send_file:
                     # Если файл не нужно отправлять, удаляем его
-                    await cleanup_minio_file(task.processed_minio_path)
+                    if task.processed_minio_path:
+                        await cleanup_minio_file(task.processed_minio_path)
+
+                    # Отправляем сообщение о завершении без файла
+                    await send_direct_message(
+                        telegram_chat_id,
+                        f"📄 <b>Обработка завершена без отправки файла</b>\n\n"
+                        f"Файл был обработан, но не отправлен\n"
+                        f"По запросу бэкенда (should_send_file=false)"
+                    )
 
                 # Удаляем также оригинальный файл
                 if task.original_minio_path:
                     await cleanup_minio_file(task.original_minio_path)
 
         else:
+            # Обработка неудачных статусов
             logger.warning(f"⚠️ [handle_kafka_response] Неуспешный статус: {status}")
+
+            error_details = ""
+            if response_data.get('error'):
+                error_details = f"\nОшибка: {response_data['error'][:200]}"
+            elif response_data.get('error_message'):
+                error_details = f"\nОшибка: {response_data['error_message'][:200]}"
+
             task.status = TaskStatus.FAILED
-            task.error_message = f"Статус: {status}"
+            task.error_message = f"Статус: {status}{error_details}"
             task.kafka_response_received = True
             await state_manager.save_task(task)
 
-            error_msg = f"❌ Ошибка обработки: {task.file_name}"
+            error_msg = (
+                f"❌ <b>Ошибка обработки</b>\n"
+                f"📄 Файл: {task.file_name}\n"
+                f"📊 Статус: {status}{error_details}"
+            )
+
             if task.is_group_task:
-                error_msg = f"❌ Ошибка обработки объединенного файла: {task.file_name}"
+                error_msg = (
+                    f"❌ <b>Ошибка обработки объединенного файла</b>\n"
+                    f"📄 Файл: {task.file_name}\n"
+                    f"📊 Статус: {status}{error_details}"
+                )
 
-            await bot.send_message(chat_id=task.chat_id, text=error_msg)
+            try:
+                await bot.send_message(
+                    chat_id=task.chat_id,
+                    text=error_msg,
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки сообщения об ошибке: {e}")
 
+            # Даже при ошибке пытаемся удалить файлы
+            try:
+                if task.original_minio_path:
+                    await cleanup_minio_file(task.original_minio_path)
+                if task.processed_minio_path:
+                    await cleanup_minio_file(task.processed_minio_path)
+            except Exception as cleanup_error:
+                logger.error(f"⚠️ Ошибка при очистке файлов после ошибки: {cleanup_error}")
+
+        # Отмечаем, что ответ получен
         await state_manager.mark_kafka_response_received(task.task_id)
 
+        # Удаляем задачу из активных
         if task.task_id in active_tasks:
             del active_tasks[task.task_id]
 
-        logger.info(f"🎉 [handle_kafka_response] Обработка завершена успешно!")
+        logger.info(f"🎉 [handle_kafka_response] Обработка завершена для задачи {task_id}")
 
     except Exception as e:
-        logger.error(f"❌ [handle_kafka_response] КРИТИЧЕСКАЯ ОШИБКА: {e}")
+        logger.error(f"❌ [handle_kafka_response] КРИТИЧЕСКАЯ ОШИБКА для задачи {task_id}: {e}")
         logger.exception(e)
+
+        # Пытаемся отправить сообщение об ошибке пользователю
+        try:
+            task_data = await state_manager.get_task(task_id) if task_id else None
+            if task_data:
+                task = ProcessingTask.from_dict(task_data)
+                error_msg = (
+                    f"💥 <b>Критическая ошибка обработки</b>\n"
+                    f"📄 Файл: {task.file_name if hasattr(task, 'file_name') else 'N/A'}\n"
+                    f"🔧 Ошибка: {str(e)[:300]}"
+                )
+
+                # Пробуем отправить через оба метода
+                try:
+                    await bot.send_message(
+                        chat_id=task.chat_id,
+                        text=error_msg,
+                        parse_mode=ParseMode.HTML
+                    )
+                except:
+                    send_telegram_message_sync(task.chat_id, error_msg)
+        except:
+            pass  # Не можем ничего сделать
 
 @dataclass
 class GroupSession:
@@ -1678,7 +1898,7 @@ class GroupSession:
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
-        "📁 Бот для обработки файлов с Kafka\n\n"
+        "📁 <b>Бот для обработки файлов с Kafka</b>\n\n"
         "Отправьте мне JSON или HTML файл, и я:\n"
         "1. 📤 Сохраню в MinIO\n"
         "2. 🔄 Отправлю задачу в Kafka\n"
@@ -1688,15 +1908,20 @@ async def cmd_start(message: Message):
         "1. Отправьте /group_start чтобы начать сбор файлов\n"
         "2. Отправляйте HTML файлы (макс. {})\n"
         "3. Отправьте /group_finish чтобы объединить и обработать\n\n"
-        "Команды:\n"
+        "<b>Команды:</b>\n"
         "/status - статус системы\n"
         "/tasks - мои задачи\n"
-        "/retry <id> - повторить задачу\n"
-        "/check <id> - проверить задачу\n"
+        "/retry &lt;id&gt; - повторить задачу\n"
+        "/check &lt;id&gt; - проверить задачу\n"
         "/group_start - начать сбор файлов\n"
         "/group_finish - завершить сбор и объединить\n"
         "/group_cancel - отменить сбор файлов\n"
-        "/group_status - статус сбора файлов".format(config.MAX_GROUP_FILES)
+        "/group_status - статус сбора файлов\n"
+        "/cleanup - очистить мои файлы\n"
+        "/debug_db - отладка БД\n\n"
+        "<b>Формат CSV результатов:</b>\n"
+        "📊 <code>username | full_name | message_count | message_percentage</code>".format(config.MAX_GROUP_FILES),
+        parse_mode=ParseMode.HTML
     )
 
 @dp.message(Command("group_start"))
